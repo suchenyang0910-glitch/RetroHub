@@ -1,0 +1,1 @@
+{"name":"retrohub","private":true,"scripts":{"dev":"pnpm --dir apps/miniapp dev","build":"pnpm --dir apps/miniapp build","api":"uvicorn app.main:app --app-dir apps/api --reload","test:api":"python -m pytest apps/api/tests"}}

@@ -1,0 +1,19 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Dependencies and build outputs
+node_modules/
+dist/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+*.db
+.pytest_cache/
+.venv/
+
+# Local tooling
+.idea/
+.vscode/
+*.log
