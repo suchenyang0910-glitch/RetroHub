@@ -1,0 +1,9 @@
+# Include this block from /etc/caddy/Caddyfile on the Linux host.
+# Caddy owns the TLS certificate; the RetroHub web container is bound only to
+# 127.0.0.1:8080 and is never exposed directly to the Internet.
+test.workline.ink {
+	reverse_proxy 127.0.0.1:8080
+	log {
+		output file /var/log/caddy/retrohub-test.log
+	}
+}
