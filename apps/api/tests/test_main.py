@@ -190,6 +190,14 @@ def test_friends_can_visit_and_water_public_farms(monkeypatch):
         assert client.post('/api/farm/plant', headers=owner_headers, json={'crop': 'wheat'}).status_code == 200
         visit = client.get(f'/api/friends/{owner_id}/farm', headers=helper_headers)
         assert visit.status_code == 200
+        visitors = client.get('/api/profile/visitors', headers=owner_headers)
+        assert visitors.status_code == 200
+        assert visitors.json()['enabled'] is True
+        assert visitors.json()['visitors'][0]['name'] == 'Demo Player'
+        assert client.put('/api/profile/visitors', headers=owner_headers, json={'enabled': False}).json() == {'enabled': False}
+        assert client.get('/api/profile/visitors', headers=owner_headers).json() == {'enabled': False, 'visitors': []}
+        assert client.put('/api/profile/visitors', headers=owner_headers, json={'enabled': True}).json() == {'enabled': True}
+        assert client.get('/api/profile/visitors', headers=owner_headers).json()['visitors'][0]['name'] == 'Demo Player'
         watered = client.post(f'/api/friends/{owner_id}/help/water', headers=helper_headers)
         assert watered.status_code == 200
         assert watered.json()['relationship_progress'] == 1

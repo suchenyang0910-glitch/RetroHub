@@ -100,6 +100,18 @@ class TelegramIdentity(Base):
     avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class VisitorPreference(Base):
+    __tablename__ = 'visitor_preferences'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+
+class ProfileVisit(Base):
+    __tablename__ = 'profile_visits'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    visitor_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    visited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
 class Friendship(Base):
     __tablename__ = 'friendships'
     __table_args__ = (UniqueConstraint('player_low_id', 'player_high_id', name='uq_friend_pair'),)
@@ -126,6 +138,7 @@ app = FastAPI(title='RetroHub Test API', version='0.2.0', lifespan=lifespan)
 class Health(BaseModel): status: str; service: str; timestamp: datetime
 class FarmAction(BaseModel): crop: str = Field(default='wheat', pattern='^wheat$')
 class PrivacyUpdate(BaseModel): farm_public: bool; collection_public: bool
+class VisitorPreferenceUpdate(BaseModel): enabled: bool
 
 async def db() -> AsyncIterator[AsyncSession]:
     async with Session() as session: yield session
@@ -223,9 +236,18 @@ async def get_or_create_profile(player: Player, session: AsyncSession) -> Player
         await session.commit()
     return profile
 
+async def get_or_create_visitor_preference(player: Player, session: AsyncSession) -> VisitorPreference:
+    preference = await session.get(VisitorPreference, player.id)
+    if not preference:
+        preference = VisitorPreference(player_id=player.id, enabled=True)
+        session.add(preference)
+        await session.commit()
+    return preference
+
 async def profile_state(player: Player, session: AsyncSession) -> dict:
     profile = await get_or_create_profile(player, session)
     identity = await session.get(TelegramIdentity, player.id)
+    visitor_preference = await get_or_create_visitor_preference(player, session)
     pets = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id))).all())
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id))).all())
     return {
@@ -233,6 +255,7 @@ async def profile_state(player: Player, session: AsyncSession) -> dict:
         'avatar_url': identity.avatar_url if identity else None,
         'honors': {'farm_level': player.farm_level, 'highest_pet_tier': max((pet.tier for pet in pets if pet.amount > 0), default=0), 'crafted_cards': len(cards)},
         'privacy': {'farm_public': profile.farm_public, 'collection_public': profile.collection_public},
+        'visitor_history_enabled': visitor_preference.enabled,
         'checkin': await checkin_state(player, session),
     }
 
@@ -271,6 +294,26 @@ async def update_profile_privacy(update: PrivacyUpdate, player: Player = Depends
     await session.commit()
     return await profile_state(player, session)
 
+@app.get('/api/profile/visitors')
+async def get_profile_visitors(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    preference = await get_or_create_visitor_preference(player, session)
+    if not preference.enabled:
+        return {'enabled': False, 'visitors': []}
+    visits = list((await session.scalars(select(ProfileVisit).where(ProfileVisit.owner_id == player.id).order_by(ProfileVisit.visited_at.desc()))).all())
+    visitors = []
+    for visit in visits:
+        visitor = await session.get(Player, visit.visitor_id)
+        identity = await session.get(TelegramIdentity, visitor.id)
+        visitors.append({'name': visitor.display_name, 'avatar_url': identity.avatar_url if identity else None, 'visited_at': visit.visited_at})
+    return {'enabled': True, 'visitors': visitors}
+
+@app.put('/api/profile/visitors')
+async def update_visitor_preference(update: VisitorPreferenceUpdate, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    preference = await get_or_create_visitor_preference(player, session)
+    preference.enabled = update.enabled
+    await session.commit()
+    return {'enabled': preference.enabled}
+
 @app.get('/api/friends/invite')
 async def friend_invite(player: Player = Depends(current_player)) -> dict:
     return {'start_param': f'friend_{player.telegram_id}', 'url': f'https://t.me/GameCenterMini_bot?startapp=friend_{player.telegram_id}'}
@@ -304,6 +347,10 @@ async def visit_friend_farm(friend_telegram_id: str, player: Player = Depends(cu
     profile = await get_or_create_profile(friend, session)
     if not profile.farm_public:
         raise HTTPException(403, 'This friend keeps their farm private')
+    preference = await get_or_create_visitor_preference(friend, session)
+    if preference.enabled:
+        session.add(ProfileVisit(owner_id=friend.id, visitor_id=player.id))
+        await session.commit()
     state = await farm_state(friend, session)
     return {'owner': friend.display_name, 'farm': {'level': state['level'], 'inventory': state['inventory'], 'plot': state['plot']}}
 
