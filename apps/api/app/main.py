@@ -99,6 +99,12 @@ class FarmCompanion(Base):
     companion_key: Mapped[str] = mapped_column(String(24), unique=False)
     adopted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class PlayerOnboarding(Base):
+    __tablename__ = 'player_onboarding'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    step: Mapped[int] = mapped_column(Integer, default=0)
+    completed: Mapped[bool] = mapped_column(default=False)
+
 class FarmOrder(Base):
     __tablename__ = 'farm_orders'
     __table_args__ = (UniqueConstraint('player_id', 'order_key', name='uq_farm_order'),)
@@ -271,6 +277,27 @@ async def farm_companion_state(player: Player, session: AsyncSession) -> dict | 
     if not companion:
         return None
     return {'key': companion.companion_key, **FARM_COMPANIONS[companion.companion_key]}
+
+ONBOARDING_STEPS = ('Plant your first wheat crop', 'Harvest the ripe crop', 'Sell one wheat from your inventory', 'Welcome to RetroHub')
+
+async def onboarding_state(player: Player, session: AsyncSession) -> dict:
+    progress = await session.get(PlayerOnboarding, player.id)
+    if not progress:
+        progress = PlayerOnboarding(player_id=player.id, step=0, completed=False)
+        session.add(progress)
+        await session.commit()
+    return {'step': progress.step, 'completed': progress.completed, 'next_action': ONBOARDING_STEPS[min(progress.step, len(ONBOARDING_STEPS) - 1)]}
+
+async def advance_onboarding(player: Player, session: AsyncSession, action: str) -> None:
+    progress = await session.get(PlayerOnboarding, player.id)
+    if not progress:
+        progress = PlayerOnboarding(player_id=player.id, step=0, completed=False)
+        session.add(progress)
+    expected = {0: 'plant', 1: 'harvest', 2: 'sell'}
+    if expected.get(progress.step) == action:
+        progress.step += 1
+        if progress.step >= 3:
+            progress.completed = True
 
 async def farm_state(p: Player, session: AsyncSession) -> dict:
     now = datetime.now(timezone.utc)
@@ -466,6 +493,10 @@ async def hub(player: Player = Depends(current_player), session: AsyncSession = 
 async def get_checkin(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     return await checkin_state(player, session)
 
+@app.get('/api/onboarding')
+async def get_onboarding(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
+    return await onboarding_state(player, session)
+
 @app.get('/api/profile')
 async def get_profile(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
     return await profile_state(player, session)
@@ -645,6 +676,7 @@ async def plant(action: FarmAction, player: Player = Depends(eligible_player), s
     grow_seconds = crop['grow_seconds'] * 9 // 10 if companion and companion.companion_key == 'dog' else crop['grow_seconds']
     player.farm_coins -= crop['seed_cost']; plot.crop = action.crop; plot.ready_at = now + timedelta(seconds=grow_seconds)
     record_farm_ledger(session, player, f'plant_{action.crop}', coins_delta=-crop['seed_cost'])
+    await advance_onboarding(player, session, 'plant')
     await record_play(player, session, 'farm')
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
 
@@ -666,6 +698,7 @@ async def harvest(player: Player = Depends(eligible_player), session: AsyncSessi
     companion = await session.get(FarmCompanion, player.id)
     stock.amount += crop['yield_amount'] + (1 if companion and companion.companion_key == 'cat' else 0)
     record_farm_ledger(session, player, f'harvest_{crop_key}', xp_delta=crop['xp'])
+    await advance_onboarding(player, session, 'harvest')
     await record_play(player, session, 'farm')
     if player.farm_xp >= player.farm_level * 30: player.farm_level += 1; player.farm_xp = 0
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
@@ -681,6 +714,7 @@ async def sell_crop(crop_key: str, player: Player = Depends(eligible_player), se
     stock.amount -= 1
     player.farm_coins += crop['sell_price']
     record_farm_ledger(session, player, f'sell_{crop_key}', coins_delta=crop['sell_price'])
+    await advance_onboarding(player, session, 'sell')
     await record_play(player, session, 'farm')
     await session.commit()
     return await farm_state(player, session)

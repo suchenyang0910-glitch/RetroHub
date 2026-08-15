@@ -229,6 +229,7 @@ def test_farm_harvest_then_sell_writes_server_ledger(monkeypatch):
         assert sold.json()['inventory']['wheat'] == 0
         assert sold.json()['coins'] == 1025
         assert sold.json()['ledger'][0] == {'type': 'sell_wheat', 'coins_delta': 45, 'xp_delta': 0}
+        assert client.get('/api/onboarding', headers=headers).json()['completed'] is True
 
 def test_farm_crop_unlocks_and_inventory_are_server_controlled(monkeypatch):
     import asyncio

@@ -12,6 +12,7 @@ type Profile = { name: string; avatar_url: string | null; age_confirmed: boolean
 type Friend = { telegram_id: string; name: string; avatar_url: string | null; farm_public: boolean };
 type FriendFarm = { owner: string; farm: { level: number; inventory: { wheat: number }; plot: { crop: string | null; ready: boolean } } };
 type Visitors = { enabled: boolean; visitors: { name: string; avatar_url: string | null; visited_at: string }[] };
+type Onboarding = { step: number; completed: boolean; next_action: string };
 type Game = 'farm' | 'pets' | 'cards';
 type Locale = 'en' | 'zh' | 'ru';
 const getTelegram = () => (window as any).Telegram?.WebApp;
@@ -49,6 +50,7 @@ function App() {
   const [friendFarm, setFriendFarm] = React.useState<FriendFarm | null>(null);
   const [friendshipEnergy, setFriendshipEnergy] = React.useState<{ current: number; cap: number } | null>(null);
   const [visitors, setVisitors] = React.useState<Visitors | null>(null);
+  const [onboarding, setOnboarding] = React.useState<Onboarding | null>(null);
   const [toast, setToast] = React.useState('');
   const [authError, setAuthError] = React.useState(false);
   const changeLocale = (next: Locale) => { window.localStorage.setItem('retrohub.locale', next); setLocale(next); };
@@ -63,6 +65,7 @@ function App() {
     setProfile(profileState);
     if (!profileState.age_confirmed) return;
     setCheckin(await request('/api/checkin'));
+    setOnboarding(await request('/api/onboarding'));
     if (game === 'farm') { setFarm(await request('/api/farm')); setFarmOrders(await request('/api/farm/orders')); }
     if (game === 'pets') setPets(await request('/api/pets'));
     if (game === 'cards') setCards(await request('/api/cards'));
@@ -81,13 +84,13 @@ function App() {
     if (!startParam?.startsWith('friend_')) return;
     void request(`/api/friends/accept/${encodeURIComponent(startParam.slice('friend_'.length))}`, 'POST').catch(() => undefined);
   }, [request]);
-  const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') { setFarm(data); setFarmOrders(await request('/api/farm/orders')); } if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); setCheckin(await request('/api/checkin')); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
+  const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') { setFarm(data); setFarmOrders(await request('/api/farm/orders')); setOnboarding(await request('/api/onboarding')); } if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); setCheckin(await request('/api/checkin')); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
   const claimCheckin = async () => { try { const data = await request('/api/checkin/claim', 'POST'); setCheckin(data); notify(`Check-in complete. +${data.collection_awarded} memory card${data.collection_awarded > 1 ? 's' : ''}.`); } catch (error) { notify(error instanceof Error ? error.message : 'Check-in unavailable'); } };
   const loadLeaderboard = async (period = 'all_time') => { try { setLeaderboard(await request(`/api/leaderboards/farm?period=${period}`)); } catch (error) { notify(error instanceof Error ? error.message : 'Leaderboard unavailable'); } };
   const loadProfile = async () => { try { const [profileState, visitorState] = await Promise.all([request('/api/profile'), request('/api/profile/visitors')]); setProfile(profileState); setVisitors(visitorState); } catch (error) { notify(error instanceof Error ? error.message : 'Profile unavailable'); } };
   const updatePrivacy = async (farmPublic: boolean, collectionPublic: boolean) => { try { const response = await fetch('/api/profile/privacy', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ farm_public: farmPublic, collection_public: collectionPublic }) }); if (!response.ok) throw new Error('Privacy update unavailable'); setProfile(await response.json()); } catch (error) { notify(error instanceof Error ? error.message : 'Privacy update unavailable'); } };
   const confirmAge = async () => { try { const response = await fetch('/api/profile/age-consent', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() } }); if (!response.ok) throw new Error('Age confirmation unavailable'); setProfile(await response.json()); await refresh(); } catch (error) { notify(error instanceof Error ? error.message : 'Age confirmation unavailable'); } };
-  const plantCrop = async (crop: string) => { try { const response = await fetch('/api/farm/plant', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ crop }) }); if (!response.ok) { const data = await response.json(); throw new Error(data.detail || 'Planting unavailable'); } setFarm(await response.json()); setFarmOrders(await request('/api/farm/orders')); notify(`${crop} planted.`); } catch (error) { notify(error instanceof Error ? error.message : 'Planting unavailable'); } };
+  const plantCrop = async (crop: string) => { try { const response = await fetch('/api/farm/plant', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ crop }) }); if (!response.ok) { const data = await response.json(); throw new Error(data.detail || 'Planting unavailable'); } setFarm(await response.json()); setFarmOrders(await request('/api/farm/orders')); setOnboarding(await request('/api/onboarding')); notify(`${crop} planted.`); } catch (error) { notify(error instanceof Error ? error.message : 'Planting unavailable'); } };
   const updateVisitorHistory = async (enabled: boolean) => { try { const response = await fetch('/api/profile/visitors', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ enabled }) }); if (!response.ok) throw new Error('Visitor preference unavailable'); const next = await response.json(); setVisitors({ enabled: next.enabled, visitors: next.enabled ? visitors?.visitors || [] : [] }); setProfile(profile ? { ...profile, visitor_history_enabled: next.enabled } : profile); } catch (error) { notify(error instanceof Error ? error.message : 'Visitor preference unavailable'); } };
   const updatePersonalization = async (enabled: boolean) => { try { const response = await fetch('/api/profile/data-preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ personalized_recommendations: enabled }) }); if (!response.ok) throw new Error('Preference update unavailable'); setProfile(profile ? { ...profile, personalized_recommendations: (await response.json()).personalized_recommendations } : profile); } catch (error) { notify(error instanceof Error ? error.message : 'Preference update unavailable'); } };
   const loadFriends = async () => { try { const [list, invite] = await Promise.all([request('/api/friends'), request('/api/friends/invite')]); setFriends(list.friends); setFriendshipEnergy({ current: list.friendship_energy, cap: list.friendship_energy_cap }); setInviteUrl(invite.url); } catch (error) { notify(error instanceof Error ? error.message : 'Friends unavailable'); } };
@@ -109,6 +112,7 @@ function App() {
   if (profile && !profile.age_confirmed) return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>Age confirmation</h1></div></header><section className="detail-panel"><b>18+ required</b><p>Confirm that you are 18 years of age or older to enter RetroHub and start playing.</p><button onClick={() => void confirmAge()}>I am 18 or older</button></section>{toast && <div role="status" className="toast">{toast}</div>}</main>;
   return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>{gameMeta[game].title}</h1></div><button className="avatar" aria-label="Telegram profile" onClick={() => changeLocale(locale === 'en' ? 'zh' : locale === 'zh' ? 'ru' : 'en')}>{locale.toUpperCase()}</button></header>
     <section className="daily"><div><span>{t.checkin}</span><strong>{checkinMessage}</strong></div><button disabled={!checkin?.can_claim} onClick={() => void claimCheckin()}>{checkin?.claimed_today ? t.claimed : t.claim}</button></section>
+    {onboarding && !onboarding.completed && <section className="detail-panel"><b>First farm guide</b><p>Step {onboarding.step + 1}/3: {onboarding.next_action}</p></section>}
     <section className="game-status"><span>{t.core}</span><strong>{status}</strong><button onClick={action.run}>{action.text}</button></section>
     <section className="section-title"><h2>{t.hall}</h2><span>{t.allOpen}</span></section>
     <section className="cards">{(Object.keys(gameMeta) as Game[]).map((id) => <article className={`game-card ${gameMeta[id].tone} ${game === id ? 'selected' : ''}`} key={id}><div className="icon">{gameMeta[id].label}</div><div className="copy"><h3>{gameMeta[id].title}</h3><p>{gameMeta[id].description}</p></div><button className={game === id ? 'ghost' : ''} onClick={() => select(id)}>{game === id ? t.playing : t.play}</button></article>)}</section>
