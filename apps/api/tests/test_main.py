@@ -84,6 +84,34 @@ def test_pet_merge_and_card_crafting_loops(monkeypatch):
         assert crafted.status_code == 200
         assert crafted.json()['cards'][0]['key'] == 'clockwork_fox'
 
+def test_pet_idle_income_and_basic_egg_use_pet_currency(monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.main import PetProfile, Player, Session, app
+    monkeypatch.setenv('DEBUG', 'true')
+    user_id = f'test-pet-idle-{uuid4()}'
+    headers = {'X-Telegram-User': user_id}
+    with TestClient(app) as client:
+        initial = client.get('/api/pets', headers=headers).json()
+        assert initial['offline_cap_seconds'] == 86_400
+
+        async def make_idle_time() -> None:
+            async with Session() as session:
+                player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
+                profile = await session.get(PetProfile, player.id)
+                profile.last_idle_claim_at = datetime.now(timezone.utc) - timedelta(seconds=125)
+                await session.commit()
+
+        asyncio.run(make_idle_time())
+        claimed = client.post('/api/pets/idle/claim', headers=headers).json()
+        assert claimed['coins'] == 512
+        bought = client.post('/api/pets/eggs/basic', headers=headers).json()
+        assert bought['coins'] == 412
+        assert bought['pets'][0]['amount'] == 7
+
 def test_daily_checkin_requires_play_and_leaderboard(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient

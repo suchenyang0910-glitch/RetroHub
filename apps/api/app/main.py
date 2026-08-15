@@ -39,6 +39,12 @@ class PetStack(Base):
     tier: Mapped[int] = mapped_column(Integer)
     amount: Mapped[int] = mapped_column(Integer, default=0)
 
+class PetProfile(Base):
+    __tablename__ = 'pet_profiles'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    coins: Mapped[int] = mapped_column(Integer, default=500)
+    last_idle_claim_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class Card(Base):
     __tablename__ = 'cards'
     __table_args__ = (UniqueConstraint('player_id', 'card_key', name='uq_player_card_key'),)
@@ -277,12 +283,24 @@ async def add_competition_points(player: Player, session: AsyncSession, points: 
         score.points += points
 
 async def pet_state(player: Player, session: AsyncSession) -> dict:
+    profile = await session.get(PetProfile, player.id)
+    if not profile:
+        profile = PetProfile(player_id=player.id)
+        session.add(profile)
+        await session.commit()
     stacks = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id).order_by(PetStack.tier))).all())
     if not stacks:
         session.add(PetStack(player_id=player.id, tier=1, amount=6))
         await session.commit()
         stacks = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id).order_by(PetStack.tier))).all())
-    return {'pets': [{'tier': stack.tier, 'amount': stack.amount} for stack in stacks if stack.amount > 0], 'merge_count': sum(stack.amount * stack.tier for stack in stacks)}
+    now = datetime.now(timezone.utc)
+    claimed_at = profile.last_idle_claim_at
+    if claimed_at.tzinfo is None:
+        claimed_at = claimed_at.replace(tzinfo=timezone.utc)
+    offline_seconds = min(86_400, max(0, int((now - claimed_at).total_seconds())))
+    production_per_minute = max(1, sum(stack.amount * stack.tier for stack in stacks))
+    claimable = (offline_seconds // 60) * production_per_minute
+    return {'pets': [{'tier': stack.tier, 'amount': stack.amount} for stack in stacks if stack.amount > 0], 'merge_count': sum(stack.amount * stack.tier for stack in stacks), 'coins': profile.coins, 'production_per_minute': production_per_minute, 'offline_seconds': offline_seconds, 'offline_cap_seconds': 86_400, 'idle_coins_claimable': claimable, 'egg_cost': 100}
 
 async def card_state(player: Player, session: AsyncSession) -> dict:
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id).order_by(Card.card_key))).all())
@@ -610,6 +628,29 @@ async def claim_daily_wheat_delivery(player: Player = Depends(current_player), s
 
 @app.get('/api/pets')
 async def get_pets(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    return await pet_state(player, session)
+
+@app.post('/api/pets/idle/claim')
+async def claim_pet_idle(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    state = await pet_state(player, session)
+    profile = await session.get(PetProfile, player.id)
+    profile.coins += state['idle_coins_claimable']
+    profile.last_idle_claim_at = datetime.now(timezone.utc)
+    await record_play(player, session, 'pet-merge')
+    await session.commit()
+    return await pet_state(player, session)
+
+@app.post('/api/pets/eggs/basic')
+async def buy_basic_pet_egg(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    await pet_state(player, session)
+    profile = await session.get(PetProfile, player.id)
+    if profile.coins < 100:
+        raise HTTPException(409, 'Not enough pet coins for a basic egg')
+    stack = await session.scalar(select(PetStack).where(PetStack.player_id == player.id, PetStack.tier == 1))
+    profile.coins -= 100
+    stack.amount += 1
+    await record_play(player, session, 'pet-merge')
+    await session.commit()
     return await pet_state(player, session)
 
 @app.post('/api/pets/merge/{tier}')
