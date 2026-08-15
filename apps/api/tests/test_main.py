@@ -232,6 +232,35 @@ def test_farm_crop_unlocks_and_inventory_are_server_controlled(monkeypatch):
         assert planted.json()['crops'][1]['unlocked'] is True
         assert client.post('/api/farm/sell/carrot', headers=headers).status_code == 409
 
+def test_farm_companion_is_adopted_once_and_has_light_bonus(monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.main import FarmPlot, Player, Session, app
+    monkeypatch.setenv('DEBUG', 'true')
+    user_id = f'test-companion-{uuid4()}'
+    headers = {'X-Telegram-User': user_id}
+    with TestClient(app) as client:
+        adopted = client.post('/api/farm/companions/cat/adopt', headers=headers)
+        assert adopted.status_code == 200
+        assert adopted.json()['companion']['key'] == 'cat'
+        assert client.post('/api/farm/companions/dog/adopt', headers=headers).status_code == 409
+        assert client.post('/api/farm/plant', headers=headers, json={'crop': 'wheat'}).status_code == 200
+
+        async def finish_crop() -> None:
+            async with Session() as session:
+                player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
+                plot = await session.get(FarmPlot, player.id)
+                plot.ready_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                await session.commit()
+
+        asyncio.run(finish_crop())
+        harvested = client.post('/api/farm/harvest', headers=headers)
+        assert harvested.status_code == 200
+        assert harvested.json()['inventory']['wheat'] == 2
+
 def test_daily_order_awards_week_and_month_competition_points(monkeypatch):
     import asyncio
     from uuid import uuid4

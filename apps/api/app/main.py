@@ -93,6 +93,12 @@ class FarmPlot(Base):
     crop: Mapped[str | None] = mapped_column(String(40), nullable=True)
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+class FarmCompanion(Base):
+    __tablename__ = 'farm_companions'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    companion_key: Mapped[str] = mapped_column(String(24), unique=False)
+    adopted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class FarmOrder(Base):
     __tablename__ = 'farm_orders'
     __table_args__ = (UniqueConstraint('player_id', 'order_key', name='uq_farm_order'),)
@@ -185,6 +191,11 @@ CROPS = {
     'carrot': {'seed_cost': 45, 'grow_seconds': 45, 'yield_amount': 2, 'sell_price': 40, 'xp': 18, 'unlock_level': 2},
     'strawberry': {'seed_cost': 100, 'grow_seconds': 120, 'yield_amount': 2, 'sell_price': 100, 'xp': 30, 'unlock_level': 3},
 }
+FARM_COMPANIONS = {
+    'dog': {'name': 'Pip the Dog', 'effect': '10% shorter crop growth'},
+    'cat': {'name': 'Momo the Cat', 'effect': '+1 crop at harvest'},
+    'rabbit': {'name': 'Bun the Rabbit', 'effect': '+10% order coin rewards'},
+}
 class Health(BaseModel): status: str; service: str; timestamp: datetime
 class FarmAction(BaseModel): crop: str = Field(default='wheat')
 class PrivacyUpdate(BaseModel): farm_public: bool; collection_public: bool
@@ -239,6 +250,12 @@ async def get_farm_plot(player: Player, session: AsyncSession) -> FarmPlot:
     await session.commit()
     return plot
 
+async def farm_companion_state(player: Player, session: AsyncSession) -> dict | None:
+    companion = await session.get(FarmCompanion, player.id)
+    if not companion:
+        return None
+    return {'key': companion.companion_key, **FARM_COMPANIONS[companion.companion_key]}
+
 async def farm_state(p: Player, session: AsyncSession) -> dict:
     now = datetime.now(timezone.utc)
     plot = await get_farm_plot(p, session)
@@ -252,7 +269,7 @@ async def farm_state(p: Player, session: AsyncSession) -> dict:
     inventory = {crop: 0 for crop in CROPS}
     inventory.update({item.item_key: item.amount for item in stock})
     recent = list((await session.scalars(select(FarmLedger).where(FarmLedger.player_id == p.id).order_by(FarmLedger.id.desc()).limit(5))).all())
-    return {'level':p.farm_level,'xp':p.farm_xp,'coins':p.farm_coins,'diamonds':p.farm_diamonds,'inventory': inventory, 'crops': [{'key': key, **details, 'unlocked': p.farm_level >= details['unlock_level']} for key, details in CROPS.items()], 'plot':{'crop': plot.crop,'ready_at':ready_at,'ready':ready}, 'ledger': [{'type': entry.entry_type, 'coins_delta': entry.coins_delta, 'xp_delta': entry.xp_delta} for entry in recent]}
+    return {'level':p.farm_level,'xp':p.farm_xp,'coins':p.farm_coins,'diamonds':p.farm_diamonds,'inventory': inventory, 'crops': [{'key': key, **details, 'unlocked': p.farm_level >= details['unlock_level']} for key, details in CROPS.items()], 'plot':{'crop': plot.crop,'ready_at':ready_at,'ready':ready}, 'companion': await farm_companion_state(p, session), 'companions': [{'key': key, **details} for key, details in FARM_COMPANIONS.items()], 'ledger': [{'type': entry.entry_type, 'coins_delta': entry.coins_delta, 'xp_delta': entry.xp_delta} for entry in recent]}
 
 def record_farm_ledger(session: AsyncSession, player: Player, entry_type: str, coins_delta: int = 0, xp_delta: int = 0) -> None:
     session.add(FarmLedger(player_id=player.id, entry_type=entry_type, coins_delta=coins_delta, xp_delta=xp_delta))
@@ -271,9 +288,11 @@ async def farm_orders_state(player: Player, session: AsyncSession) -> dict:
         await session.commit()
     wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
     available = {'wheat': wheat.amount if wheat else 0}
+    companion = await session.get(FarmCompanion, player.id)
+    reward_multiplier = 1.1 if companion and companion.companion_key == 'rabbit' else 1
     return {'orders': [
-        {'key': 'wheat_delivery', 'title': 'Town Bakery Delivery', 'required': {'wheat': 2}, 'available': available, 'reward': {'coins': 120, 'xp': 40, 'competition_points': 10}, 'claimed': order.claimed, 'daily': False},
-        {'key': 'daily_wheat_delivery', 'title': 'Daily Market Delivery', 'required': {'wheat': 3}, 'available': available, 'reward': {'coins': 220, 'xp': 60, 'competition_points': 30}, 'claimed': daily.claimed, 'daily': True},
+        {'key': 'wheat_delivery', 'title': 'Town Bakery Delivery', 'required': {'wheat': 2}, 'available': available, 'reward': {'coins': int(120 * reward_multiplier), 'xp': 40, 'competition_points': 10}, 'claimed': order.claimed, 'daily': False},
+        {'key': 'daily_wheat_delivery', 'title': 'Daily Market Delivery', 'required': {'wheat': 3}, 'available': available, 'reward': {'coins': int(220 * reward_multiplier), 'xp': 60, 'competition_points': 30}, 'claimed': daily.claimed, 'daily': True},
     ]}
 
 def competition_period_key(period: str, today: date) -> str:
@@ -560,6 +579,17 @@ async def get_farm(player: Player = Depends(current_player), session: AsyncSessi
 async def get_farm_orders(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
     return await farm_orders_state(player, session)
 
+@app.post('/api/farm/companions/{companion_key}/adopt')
+async def adopt_farm_companion(companion_key: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    if companion_key not in FARM_COMPANIONS:
+        raise HTTPException(422, 'Unsupported companion')
+    if await session.get(FarmCompanion, player.id):
+        raise HTTPException(409, 'A farm companion has already been adopted')
+    session.add(FarmCompanion(player_id=player.id, companion_key=companion_key))
+    await record_play(player, session, 'farm')
+    await session.commit()
+    return await farm_state(player, session)
+
 @app.post('/api/farm/plant')
 async def plant(action: FarmAction, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
     now = datetime.now(timezone.utc)
@@ -569,7 +599,9 @@ async def plant(action: FarmAction, player: Player = Depends(current_player), se
     plot = await get_farm_plot(player, session)
     if plot.crop: raise HTTPException(409, 'A crop is already growing')
     if player.farm_coins < crop['seed_cost']: raise HTTPException(409, 'Not enough coins')
-    player.farm_coins -= crop['seed_cost']; plot.crop = action.crop; plot.ready_at = now + timedelta(seconds=crop['grow_seconds'])
+    companion = await session.get(FarmCompanion, player.id)
+    grow_seconds = crop['grow_seconds'] * 9 // 10 if companion and companion.companion_key == 'dog' else crop['grow_seconds']
+    player.farm_coins -= crop['seed_cost']; plot.crop = action.crop; plot.ready_at = now + timedelta(seconds=grow_seconds)
     record_farm_ledger(session, player, f'plant_{action.crop}', coins_delta=-crop['seed_cost'])
     await record_play(player, session, 'farm')
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
@@ -589,7 +621,8 @@ async def harvest(player: Player = Depends(current_player), session: AsyncSessio
     if not stock:
         stock = FarmStock(player_id=player.id, item_key=crop_key, amount=0)
         session.add(stock)
-    stock.amount += crop['yield_amount']
+    companion = await session.get(FarmCompanion, player.id)
+    stock.amount += crop['yield_amount'] + (1 if companion and companion.companion_key == 'cat' else 0)
     record_farm_ledger(session, player, f'harvest_{crop_key}', xp_delta=crop['xp'])
     await record_play(player, session, 'farm')
     if player.farm_xp >= player.farm_level * 30: player.farm_level += 1; player.farm_xp = 0
@@ -621,9 +654,11 @@ async def claim_wheat_delivery(player: Player = Depends(current_player), session
         raise HTTPException(409, 'Two wheat are required for this order')
     wheat.amount -= 2
     order.claimed = True
-    player.farm_coins += 120
+    companion = await session.get(FarmCompanion, player.id)
+    coin_reward = 132 if companion and companion.companion_key == 'rabbit' else 120
+    player.farm_coins += coin_reward
     player.farm_xp += 40
-    record_farm_ledger(session, player, 'order_wheat_delivery', coins_delta=120, xp_delta=40)
+    record_farm_ledger(session, player, 'order_wheat_delivery', coins_delta=coin_reward, xp_delta=40)
     await add_competition_points(player, session, 10)
     await record_play(player, session, 'farm')
     await session.commit()
@@ -643,9 +678,11 @@ async def claim_daily_wheat_delivery(player: Player = Depends(current_player), s
         raise HTTPException(409, 'Three wheat are required for today\'s market delivery')
     wheat.amount -= 3
     daily.claimed = True
-    player.farm_coins += 220
+    companion = await session.get(FarmCompanion, player.id)
+    coin_reward = 242 if companion and companion.companion_key == 'rabbit' else 220
+    player.farm_coins += coin_reward
     player.farm_xp += 60
-    record_farm_ledger(session, player, 'order_daily_wheat_delivery', coins_delta=220, xp_delta=60)
+    record_farm_ledger(session, player, 'order_daily_wheat_delivery', coins_delta=coin_reward, xp_delta=60)
     await add_competition_points(player, session, 30)
     await record_play(player, session, 'farm')
     await session.commit()
