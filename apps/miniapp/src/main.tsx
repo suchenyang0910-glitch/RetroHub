@@ -6,6 +6,7 @@ type Farm = { level: number; xp: number; coins: number; diamonds: number; plot: 
 type Pets = { pets: { tier: number; amount: number }[] };
 type Cards = { materials: number; chapter: number; cards: { key: string; level: number }[] };
 type Checkin = { played_today: boolean; claimed_today: boolean; streak: number; can_claim: boolean; collection_awarded?: number };
+type Leaderboard = { entries: { rank: number; name: string; level: number; xp: number; is_me: boolean }[] };
 type Game = 'farm' | 'pets' | 'cards';
 const getTelegram = () => (window as any).Telegram?.WebApp;
 const headers = (): Record<string, string> => { const initData = getTelegram()?.initData as string | undefined; return initData ? { 'X-Telegram-Init-Data': initData } : {}; };
@@ -21,6 +22,7 @@ function App() {
   const [pets, setPets] = React.useState<Pets | null>(null);
   const [cards, setCards] = React.useState<Cards | null>(null);
   const [checkin, setCheckin] = React.useState<Checkin | null>(null);
+  const [leaderboard, setLeaderboard] = React.useState<Leaderboard | null>(null);
   const [toast, setToast] = React.useState('');
   const [authError, setAuthError] = React.useState(false);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200); };
@@ -44,8 +46,9 @@ function App() {
     const timer = window.setInterval(() => { void load(); }, 15_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [refresh]);
-  const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') setFarm(data); if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
+  const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') setFarm(data); if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); setCheckin(await request('/api/checkin')); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
   const claimCheckin = async () => { try { const data = await request('/api/checkin/claim', 'POST'); setCheckin(data); notify(`Check-in complete. +${data.collection_awarded} memory card${data.collection_awarded > 1 ? 's' : ''}.`); } catch (error) { notify(error instanceof Error ? error.message : 'Check-in unavailable'); } };
+  const loadLeaderboard = async () => { try { setLeaderboard(await request('/api/leaderboards/farm')); } catch (error) { notify(error instanceof Error ? error.message : 'Leaderboard unavailable'); } };
   const farmReady = farm?.plot.crop && farm.plot.ready;
   const petTier = pets?.pets.find((pet) => pet.amount >= 2)?.tier;
   const select = (next: Game) => { setGame(next); setToast('Loading ' + gameMeta[next].title + '...'); };
@@ -65,7 +68,8 @@ function App() {
     <section className="cards">{(Object.keys(gameMeta) as Game[]).map((id) => <article className={`game-card ${gameMeta[id].tone} ${game === id ? 'selected' : ''}`} key={id}><div className="icon">{gameMeta[id].label}</div><div className="copy"><h3>{gameMeta[id].title}</h3><p>{gameMeta[id].description}</p></div><button className={game === id ? 'ghost' : ''} onClick={() => select(id)}>{game === id ? 'Playing' : 'Play'}</button></article>)}</section>
     {game === 'pets' && pets && <section className="detail-panel"><b>Pet board</b><p>{pets.pets.map((pet) => `Tier ${pet.tier}: ${pet.amount}`).join(' · ')}</p></section>}
     {game === 'cards' && cards && <section className="detail-panel"><b>Crafting forge</b><p>{cards.cards.length ? cards.cards.map((card) => `${card.key.replace('_', ' ')} Lv.${card.level}`).join(' · ') : 'No cards crafted yet.'}</p><button onClick={() => void perform('/api/cards/craft/clockwork_fox', 'Clockwork Fox forged!')}>Craft Clockwork Fox (30)</button></section>}
-    <section className="status"><div><span className="pulse" /> Beta is open</div><button onClick={() => notify('Rankings launch with Season 1')}>Leaderboard</button></section>
+    {leaderboard && <section className="detail-panel"><b>Farm leaderboard</b><p>{leaderboard.entries.length ? leaderboard.entries.slice(0, 5).map((entry) => `#${entry.rank} ${entry.name} Lv.${entry.level}${entry.is_me ? ' (You)' : ''}`).join(' · ') : 'No farm rankings yet.'}</p></section>}
+    <section className="status"><div><span className="pulse" /> Beta is open</div><button onClick={() => void loadLeaderboard()}>Leaderboard</button></section>
     <nav><button className="active">Hall</button><button>Friends</button><button>Ranks</button><button>Me</button></nav>{toast && <div role="status" className="toast">{toast}</div>}</main>;
 }
 createRoot(document.getElementById('root')!).render(<App />);
