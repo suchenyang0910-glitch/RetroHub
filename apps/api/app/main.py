@@ -85,6 +85,22 @@ class PlayerProfile(Base):
     farm_public: Mapped[bool] = mapped_column(default=False)
     collection_public: Mapped[bool] = mapped_column(default=False)
 
+class Friendship(Base):
+    __tablename__ = 'friendships'
+    __table_args__ = (UniqueConstraint('player_low_id', 'player_high_id', name='uq_friend_pair'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_low_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    player_high_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+
+class FarmHelp(Base):
+    __tablename__ = 'farm_helps'
+    __table_args__ = (UniqueConstraint('helper_id', 'target_id', 'help_type', 'helped_on', name='uq_daily_farm_help'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    helper_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    help_type: Mapped[str] = mapped_column(String(20))
+    helped_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(timezone.utc).date())
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all)
@@ -189,6 +205,18 @@ async def profile_state(player: Player, session: AsyncSession) -> dict:
         'checkin': await checkin_state(player, session),
     }
 
+async def friendship_exists(player_a: int, player_b: int, session: AsyncSession) -> bool:
+    low, high = sorted((player_a, player_b))
+    return bool(await session.scalar(select(Friendship.id).where(Friendship.player_low_id == low, Friendship.player_high_id == high)))
+
+async def friend_target(friend_telegram_id: str, player: Player, session: AsyncSession) -> Player:
+    friend = await session.scalar(select(Player).where(Player.telegram_id == friend_telegram_id))
+    if not friend:
+        raise HTTPException(404, 'Friend has not opened RetroHub yet')
+    if friend.id == player.id:
+        raise HTTPException(422, 'You cannot add yourself as a friend')
+    return friend
+
 @app.get('/health', response_model=Health)
 async def health() -> Health: return Health(status='ok', service='retrohub-api', timestamp=datetime.now(timezone.utc))
 
@@ -211,6 +239,66 @@ async def update_profile_privacy(update: PrivacyUpdate, player: Player = Depends
     profile.collection_public = update.collection_public
     await session.commit()
     return await profile_state(player, session)
+
+@app.get('/api/friends/invite')
+async def friend_invite(player: Player = Depends(current_player)) -> dict:
+    return {'start_param': f'friend_{player.telegram_id}', 'url': f'https://t.me/GameCenterMini_bot?startapp=friend_{player.telegram_id}'}
+
+@app.post('/api/friends/accept/{friend_telegram_id}')
+async def accept_friend(friend_telegram_id: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    friend = await friend_target(friend_telegram_id, player, session)
+    low, high = sorted((player.id, friend.id))
+    if not await friendship_exists(player.id, friend.id, session):
+        session.add(Friendship(player_low_id=low, player_high_id=high))
+        await session.commit()
+    return {'friend': {'telegram_id': friend.telegram_id, 'name': friend.display_name}, 'accepted': True}
+
+@app.get('/api/friends')
+async def get_friends(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    links = list((await session.scalars(select(Friendship).where((Friendship.player_low_id == player.id) | (Friendship.player_high_id == player.id)))).all())
+    friend_ids = [link.player_high_id if link.player_low_id == player.id else link.player_low_id for link in links]
+    friends = [await session.get(Player, friend_id) for friend_id in friend_ids]
+    result = []
+    for friend in friends:
+        profile = await get_or_create_profile(friend, session)
+        result.append({'telegram_id': friend.telegram_id, 'name': friend.display_name, 'farm_public': profile.farm_public})
+    return {'friends': result}
+
+@app.get('/api/friends/{friend_telegram_id}/farm')
+async def visit_friend_farm(friend_telegram_id: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    friend = await friend_target(friend_telegram_id, player, session)
+    if not await friendship_exists(player.id, friend.id, session):
+        raise HTTPException(403, 'Add this player as a friend first')
+    profile = await get_or_create_profile(friend, session)
+    if not profile.farm_public:
+        raise HTTPException(403, 'This friend keeps their farm private')
+    state = await farm_state(friend, session)
+    return {'owner': friend.display_name, 'farm': {'level': state['level'], 'inventory': state['inventory'], 'plot': state['plot']}}
+
+@app.post('/api/friends/{friend_telegram_id}/help/water')
+async def water_friend_farm(friend_telegram_id: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    friend = await friend_target(friend_telegram_id, player, session)
+    if not await friendship_exists(player.id, friend.id, session):
+        raise HTTPException(403, 'Add this player as a friend first')
+    profile = await get_or_create_profile(friend, session)
+    if not profile.farm_public:
+        raise HTTPException(403, 'This friend keeps their farm private')
+    today = datetime.now(timezone.utc).date()
+    helped = await session.scalar(select(FarmHelp).where(FarmHelp.helper_id == player.id, FarmHelp.target_id == friend.id, FarmHelp.help_type == 'water', FarmHelp.helped_on == today))
+    if helped:
+        raise HTTPException(409, 'You already watered this friend today')
+    now = datetime.now(timezone.utc)
+    ready_at = friend.wheat_ready_at
+    if ready_at and ready_at.tzinfo is None:
+        ready_at = ready_at.replace(tzinfo=timezone.utc)
+    seconds_saved = 0
+    if ready_at and ready_at > now:
+        boosted = ready_at - timedelta(seconds=5)
+        friend.wheat_ready_at = max(boosted, now)
+        seconds_saved = 5
+    session.add(FarmHelp(helper_id=player.id, target_id=friend.id, help_type='water', helped_on=today))
+    await session.commit()
+    return {'owner': friend.display_name, 'help': 'water', 'seconds_saved': seconds_saved, 'relationship_progress': 1}
 
 @app.post('/api/checkin/claim')
 async def claim_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:

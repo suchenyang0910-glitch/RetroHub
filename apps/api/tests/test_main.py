@@ -120,3 +120,26 @@ def test_profile_honors_and_privacy_controls(monkeypatch):
         updated = client.put('/api/profile/privacy', headers=headers, json={'farm_public': True, 'collection_public': True})
         assert updated.status_code == 200
         assert updated.json()['privacy'] == {'farm_public': True, 'collection_public': True}
+
+def test_friends_can_visit_and_water_public_farms(monkeypatch):
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from app.main import app
+    monkeypatch.setenv('DEBUG', 'true')
+    owner_id, helper_id = f'owner-{uuid4()}', f'helper-{uuid4()}'
+    owner_headers, helper_headers = {'X-Telegram-User': owner_id}, {'X-Telegram-User': helper_id}
+    with TestClient(app) as client:
+        client.get('/api/profile', headers=owner_headers)
+        client.get('/api/profile', headers=helper_headers)
+        assert client.put('/api/profile/privacy', headers=owner_headers, json={'farm_public': True, 'collection_public': False}).status_code == 200
+        accepted = client.post(f'/api/friends/accept/{owner_id}', headers=helper_headers)
+        assert accepted.status_code == 200
+        friends = client.get('/api/friends', headers=helper_headers)
+        assert friends.json()['friends'][0]['telegram_id'] == owner_id
+        assert client.post('/api/farm/plant', headers=owner_headers, json={'crop': 'wheat'}).status_code == 200
+        visit = client.get(f'/api/friends/{owner_id}/farm', headers=helper_headers)
+        assert visit.status_code == 200
+        watered = client.post(f'/api/friends/{owner_id}/help/water', headers=helper_headers)
+        assert watered.status_code == 200
+        assert watered.json()['relationship_progress'] == 1
+        assert client.post(f'/api/friends/{owner_id}/help/water', headers=helper_headers).status_code == 409

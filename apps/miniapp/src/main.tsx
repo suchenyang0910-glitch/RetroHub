@@ -9,6 +9,8 @@ type Cards = { materials: number; chapter: number; cards: { key: string; level: 
 type Checkin = { played_today: boolean; claimed_today: boolean; streak: number; can_claim: boolean; collection_awarded?: number };
 type Leaderboard = { entries: { rank: number; name: string; level: number; xp: number; is_me: boolean }[] };
 type Profile = { name: string; honors: { farm_level: number; highest_pet_tier: number; crafted_cards: number }; privacy: { farm_public: boolean; collection_public: boolean } };
+type Friend = { telegram_id: string; name: string; farm_public: boolean };
+type FriendFarm = { owner: string; farm: { level: number; inventory: { wheat: number }; plot: { crop: string | null; ready: boolean } } };
 type Game = 'farm' | 'pets' | 'cards';
 type Locale = 'en' | 'zh' | 'ru';
 const getTelegram = () => (window as any).Telegram?.WebApp;
@@ -41,6 +43,9 @@ function App() {
   const [checkin, setCheckin] = React.useState<Checkin | null>(null);
   const [leaderboard, setLeaderboard] = React.useState<Leaderboard | null>(null);
   const [profile, setProfile] = React.useState<Profile | null>(null);
+  const [friends, setFriends] = React.useState<Friend[] | null>(null);
+  const [inviteUrl, setInviteUrl] = React.useState('');
+  const [friendFarm, setFriendFarm] = React.useState<FriendFarm | null>(null);
   const [toast, setToast] = React.useState('');
   const [authError, setAuthError] = React.useState(false);
   const changeLocale = (next: Locale) => { window.localStorage.setItem('retrohub.locale', next); setLocale(next); };
@@ -65,11 +70,20 @@ function App() {
     const timer = window.setInterval(() => { void load(); }, 15_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [refresh]);
+  React.useEffect(() => {
+    const startParam = getTelegram()?.initDataUnsafe?.start_param as string | undefined;
+    if (!startParam?.startsWith('friend_')) return;
+    void request(`/api/friends/accept/${encodeURIComponent(startParam.slice('friend_'.length))}`, 'POST').catch(() => undefined);
+  }, [request]);
   const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') { setFarm(data); setFarmOrders(await request('/api/farm/orders')); } if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); setCheckin(await request('/api/checkin')); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
   const claimCheckin = async () => { try { const data = await request('/api/checkin/claim', 'POST'); setCheckin(data); notify(`Check-in complete. +${data.collection_awarded} memory card${data.collection_awarded > 1 ? 's' : ''}.`); } catch (error) { notify(error instanceof Error ? error.message : 'Check-in unavailable'); } };
   const loadLeaderboard = async () => { try { setLeaderboard(await request('/api/leaderboards/farm')); } catch (error) { notify(error instanceof Error ? error.message : 'Leaderboard unavailable'); } };
   const loadProfile = async () => { try { setProfile(await request('/api/profile')); } catch (error) { notify(error instanceof Error ? error.message : 'Profile unavailable'); } };
   const updatePrivacy = async (farmPublic: boolean, collectionPublic: boolean) => { try { const response = await fetch('/api/profile/privacy', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ farm_public: farmPublic, collection_public: collectionPublic }) }); if (!response.ok) throw new Error('Privacy update unavailable'); setProfile(await response.json()); } catch (error) { notify(error instanceof Error ? error.message : 'Privacy update unavailable'); } };
+  const loadFriends = async () => { try { const [list, invite] = await Promise.all([request('/api/friends'), request('/api/friends/invite')]); setFriends(list.friends); setInviteUrl(invite.url); } catch (error) { notify(error instanceof Error ? error.message : 'Friends unavailable'); } };
+  const visitFriend = async (telegramId: string) => { try { setFriendFarm(await request(`/api/friends/${encodeURIComponent(telegramId)}/farm`)); } catch (error) { notify(error instanceof Error ? error.message : 'Farm visit unavailable'); } };
+  const waterFriend = async (telegramId: string) => { try { const result = await request(`/api/friends/${encodeURIComponent(telegramId)}/help/water`, 'POST'); notify(`${result.owner}'s farm was watered. ${result.seconds_saved}s saved.`); } catch (error) { notify(error instanceof Error ? error.message : 'Farm help unavailable'); } };
+  const shareInvite = () => { if (!inviteUrl) return; const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent('Join me in RetroHub')}`; const telegram = getTelegram(); if (telegram?.openTelegramLink) telegram.openTelegramLink(shareUrl); else notify(inviteUrl); };
   const farmReady = farm?.plot.crop && farm.plot.ready;
   const petTier = pets?.pets.find((pet) => pet.amount >= 2)?.tier;
   const select = (next: Game) => { setGame(next); setToast('Loading ' + gameMeta[next].title + '...'); };
@@ -92,7 +106,8 @@ function App() {
     {game === 'cards' && cards && <section className="detail-panel"><b>{t.forge}</b><p>{cards.cards.length ? cards.cards.map((card) => `${card.key.replace('_', ' ')} Lv.${card.level}`).join(' · ') : t.noCards}</p><button onClick={() => void perform('/api/cards/craft/clockwork_fox', 'Clockwork Fox forged!')}>{t.craft}</button></section>}
     {leaderboard && <section className="detail-panel"><b>{t.leaderboard}</b><p>{leaderboard.entries.length ? leaderboard.entries.slice(0, 5).map((entry) => `#${entry.rank} ${entry.name} Lv.${entry.level}${entry.is_me ? ' (You)' : ''}`).join(' · ') : t.noRanks}</p></section>}
     {profile && <section className="detail-panel"><b>{profile.name}'s profile</b><p>Farm Lv.{profile.honors.farm_level} · Pet tier {profile.honors.highest_pet_tier || '-'} · {profile.honors.crafted_cards} crafted cards</p><button onClick={() => void updatePrivacy(!profile.privacy.farm_public, profile.privacy.collection_public)}>Farm: {profile.privacy.farm_public ? 'Public' : 'Private'}</button><button onClick={() => void updatePrivacy(profile.privacy.farm_public, !profile.privacy.collection_public)}>Collection: {profile.privacy.collection_public ? 'Public' : 'Private'}</button></section>}
+    {friends && <section className="detail-panel"><b>Friends</b><p>{friends.length ? `${friends.length} friend${friends.length === 1 ? '' : 's'} connected through Telegram.` : 'Invite a Telegram friend to visit their farm.'}</p><button onClick={shareInvite}>Invite friend</button>{friends.map((friend) => <p key={friend.telegram_id}>{friend.name} · Farm {friend.farm_public ? 'Public' : 'Private'} <button onClick={() => void visitFriend(friend.telegram_id)}>Visit</button>{friend.farm_public && <button onClick={() => void waterFriend(friend.telegram_id)}>Water</button>}</p>)}{friendFarm && <p>Visiting {friendFarm.owner}: Lv.{friendFarm.farm.level} · {friendFarm.farm.inventory.wheat} wheat · {friendFarm.farm.plot.crop ? (friendFarm.farm.plot.ready ? 'Harvest ready' : 'Crop growing') : 'Empty plot'}</p>}</section>}
     <section className="status"><div><span className="pulse" /> {t.beta}</div><button onClick={() => void loadLeaderboard()}>{t.ranks}</button></section>
-    <nav><button className="active">{t.navHall}</button><button>{t.friends}</button><button onClick={() => void loadLeaderboard()}>{t.ranks}</button><button onClick={() => void loadProfile()}>{t.me}</button></nav>{toast && <div role="status" className="toast">{toast}</div>}</main>;
+    <nav><button className="active">{t.navHall}</button><button onClick={() => void loadFriends()}>{t.friends}</button><button onClick={() => void loadLeaderboard()}>{t.ranks}</button><button onClick={() => void loadProfile()}>{t.me}</button></nav>{toast && <div role="status" className="toast">{toast}</div>}</main>;
 }
 createRoot(document.getElementById('root')!).render(<App />);
