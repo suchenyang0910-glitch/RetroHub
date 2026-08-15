@@ -229,6 +229,23 @@ FARM_COMPANIONS = {
     'cat': {'name': 'Momo the Cat', 'effect': '+1 crop at harvest'},
     'rabbit': {'name': 'Bun the Rabbit', 'effect': '+10% order coin rewards'},
 }
+FAQ = {
+    'en': [
+        {'question': 'How do I start farming?', 'answer': 'Plant a crop, wait for it to mature, then harvest and sell or deliver it.'},
+        {'question': 'Can I reset game data myself?', 'answer': 'No. Submit a reset request and support will review it.'},
+        {'question': 'How does friendship energy work?', 'answer': 'It refreshes daily and is used for gentle farm help such as watering.'},
+    ],
+    'zh': [
+        {'question': '如何开始农场？', 'answer': '种植作物，等待成熟后收获，再出售或交付订单。'},
+        {'question': '可以自行重置游戏数据吗？', 'answer': '不可以。请提交重置申请，由客服审核。'},
+        {'question': '友情能量如何使用？', 'answer': '友情能量每日恢复，用于浇水等温和好友农场帮助。'},
+    ],
+    'ru': [
+        {'question': 'Как начать ферму?', 'answer': 'Посадите культуру, дождитесь созревания, затем соберите и продайте или сдайте заказ.'},
+        {'question': 'Можно самому сбросить данные?', 'answer': 'Нет. Отправьте заявку, и поддержка рассмотрит её.'},
+        {'question': 'Как работает энергия дружбы?', 'answer': 'Она восстанавливается ежедневно и тратится на помощь друзьям на ферме.'},
+    ],
+}
 class Health(BaseModel): status: str; service: str; timestamp: datetime
 class FarmAction(BaseModel): crop: str = Field(default='wheat')
 class PrivacyUpdate(BaseModel): farm_public: bool; collection_public: bool
@@ -566,6 +583,10 @@ async def update_data_preference(update: DataPreferenceUpdate, player: Player = 
 async def get_my_support_tickets(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
     tickets = list((await session.scalars(select(SupportTicket).where(SupportTicket.player_id == player.id).order_by(SupportTicket.created_at.desc()))).all())
     return {'tickets': [{'id': ticket.id, 'category': ticket.category, 'game': ticket.game, 'status': ticket.status, 'created_at': ticket.created_at} for ticket in tickets]}
+
+@app.get('/api/support/faq')
+async def get_support_faq(locale: str = Query(default='en')) -> dict:
+    return {'locale': locale if locale in FAQ else 'en', 'entries': FAQ.get(locale, FAQ['en'])}
 
 @app.post('/api/support/reset-request')
 async def request_game_reset(request: ResetRequest, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:

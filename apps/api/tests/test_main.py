@@ -352,6 +352,16 @@ def test_game_reset_is_support_ticket_only(monkeypatch):
         tickets = client.get('/api/support/tickets/me', headers=headers).json()['tickets']
         assert tickets[0]['game'] == 'farm'
 
+def test_support_faq_is_available_in_supported_locales():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        chinese = client.get('/api/support/faq?locale=zh').json()
+        fallback = client.get('/api/support/faq?locale=unknown').json()
+        assert chinese['locale'] == 'zh'
+        assert len(chinese['entries']) >= 3
+        assert fallback['locale'] == 'en'
+
 def test_friends_can_visit_and_water_public_farms(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient
