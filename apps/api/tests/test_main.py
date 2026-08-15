@@ -103,6 +103,8 @@ def test_pet_merge_and_card_crafting_loops(monkeypatch):
         assert any(pet['tier'] == 2 for pet in merged.json()['pets'])
         battle = client.post('/api/cards/battle', headers=headers)
         assert battle.status_code == 200
+        assert battle.json()['battle']['turn'] == 2
+        assert client.post('/api/cards/battle/not-a-choice', headers=headers).status_code == 422
         crafted = client.post('/api/cards/craft/clockwork_fox', headers=headers)
         assert crafted.status_code == 200
         assert crafted.json()['cards'][0]['key'] == 'clockwork_fox'
