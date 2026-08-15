@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -84,6 +84,23 @@ class FarmOrder(Base):
     player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
     order_key: Mapped[str] = mapped_column(String(40))
     claimed: Mapped[bool] = mapped_column(default=False)
+
+class FarmDailyOrder(Base):
+    __tablename__ = 'farm_daily_orders'
+    __table_args__ = (UniqueConstraint('player_id', 'order_day', name='uq_daily_farm_order'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    order_day: Mapped[date] = mapped_column(Date, index=True)
+    claimed: Mapped[bool] = mapped_column(default=False)
+
+class FarmCompetitionScore(Base):
+    __tablename__ = 'farm_competition_scores'
+    __table_args__ = (UniqueConstraint('player_id', 'period', 'period_key', name='uq_farm_competition_period'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    period: Mapped[str] = mapped_column(String(12), index=True)
+    period_key: Mapped[str] = mapped_column(String(16), index=True)
+    points: Mapped[int] = mapped_column(Integer, default=0)
 
 class FarmLedger(Base):
     __tablename__ = 'farm_ledger'
@@ -230,8 +247,34 @@ async def farm_orders_state(player: Player, session: AsyncSession) -> dict:
         order = FarmOrder(player_id=player.id, order_key='wheat_delivery')
         session.add(order)
         await session.commit()
+    today = datetime.now(timezone.utc).date()
+    daily = await session.scalar(select(FarmDailyOrder).where(FarmDailyOrder.player_id == player.id, FarmDailyOrder.order_day == today))
+    if not daily:
+        daily = FarmDailyOrder(player_id=player.id, order_day=today)
+        session.add(daily)
+        await session.commit()
     wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
-    return {'orders': [{'key': 'wheat_delivery', 'title': 'Town Bakery Delivery', 'required': {'wheat': 2}, 'available': {'wheat': wheat.amount if wheat else 0}, 'reward': {'coins': 120, 'xp': 40}, 'claimed': order.claimed}]}
+    available = {'wheat': wheat.amount if wheat else 0}
+    return {'orders': [
+        {'key': 'wheat_delivery', 'title': 'Town Bakery Delivery', 'required': {'wheat': 2}, 'available': available, 'reward': {'coins': 120, 'xp': 40, 'competition_points': 10}, 'claimed': order.claimed, 'daily': False},
+        {'key': 'daily_wheat_delivery', 'title': 'Daily Market Delivery', 'required': {'wheat': 3}, 'available': available, 'reward': {'coins': 220, 'xp': 60, 'competition_points': 30}, 'claimed': daily.claimed, 'daily': True},
+    ]}
+
+def competition_period_key(period: str, today: date) -> str:
+    if period == 'week':
+        year, week, _ = today.isocalendar()
+        return f'{year}-W{week:02d}'
+    return today.strftime('%Y-%m')
+
+async def add_competition_points(player: Player, session: AsyncSession, points: int) -> None:
+    today = datetime.now(timezone.utc).date()
+    for period in ('week', 'month'):
+        key = competition_period_key(period, today)
+        score = await session.scalar(select(FarmCompetitionScore).where(FarmCompetitionScore.player_id == player.id, FarmCompetitionScore.period == period, FarmCompetitionScore.period_key == key))
+        if not score:
+            score = FarmCompetitionScore(player_id=player.id, period=period, period_key=key, points=0)
+            session.add(score)
+        score.points += points
 
 async def pet_state(player: Player, session: AsyncSession) -> dict:
     stacks = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id).order_by(PetStack.tier))).all())
@@ -454,10 +497,17 @@ async def claim_checkin(player: Player = Depends(current_player), session: Async
     return {**await checkin_state(player, session), 'collection_awarded': reward}
 
 @app.get('/api/leaderboards/farm')
-async def farm_leaderboard(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
-    players = list((await session.scalars(select(Player).order_by(Player.farm_level.desc(), Player.farm_xp.desc(), Player.id.asc()).limit(20))).all())
-    entries = [{'rank': index + 1, 'name': row.display_name, 'level': row.farm_level, 'xp': row.farm_xp, 'is_me': row.id == player.id} for index, row in enumerate(players)]
-    return {'period': 'all_time', 'metric': 'farm_level', 'entries': entries}
+async def farm_leaderboard(period: str = Query(default='all_time'), player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    if period == 'all_time':
+        players = list((await session.scalars(select(Player).order_by(Player.farm_level.desc(), Player.farm_xp.desc(), Player.id.asc()).limit(20))).all())
+        entries = [{'rank': index + 1, 'name': row.display_name, 'level': row.farm_level, 'xp': row.farm_xp, 'is_me': row.id == player.id} for index, row in enumerate(players)]
+        return {'period': period, 'metric': 'farm_level', 'entries': entries}
+    if period not in {'week', 'month'}:
+        raise HTTPException(422, 'Unsupported leaderboard period')
+    period_key = competition_period_key(period, datetime.now(timezone.utc).date())
+    rows = (await session.execute(select(FarmCompetitionScore, Player).join(Player, FarmCompetitionScore.player_id == Player.id).where(FarmCompetitionScore.period == period, FarmCompetitionScore.period_key == period_key).order_by(FarmCompetitionScore.points.desc(), Player.id.asc()).limit(20))).all()
+    entries = [{'rank': index + 1, 'name': row.Player.display_name, 'points': row.FarmCompetitionScore.points, 'is_me': row.Player.id == player.id} for index, row in enumerate(rows)]
+    return {'period': period, 'period_key': period_key, 'metric': 'order_points', 'entries': entries}
 
 @app.get('/api/farm')
 async def get_farm(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
@@ -531,6 +581,29 @@ async def claim_wheat_delivery(player: Player = Depends(current_player), session
     player.farm_coins += 120
     player.farm_xp += 40
     record_farm_ledger(session, player, 'order_wheat_delivery', coins_delta=120, xp_delta=40)
+    await add_competition_points(player, session, 10)
+    await record_play(player, session, 'farm')
+    await session.commit()
+    return {**await farm_state(player, session), **await farm_orders_state(player, session)}
+
+@app.post('/api/farm/orders/daily_wheat_delivery/claim')
+async def claim_daily_wheat_delivery(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    today = datetime.now(timezone.utc).date()
+    daily = await session.scalar(select(FarmDailyOrder).where(FarmDailyOrder.player_id == player.id, FarmDailyOrder.order_day == today))
+    if not daily:
+        await farm_orders_state(player, session)
+        daily = await session.scalar(select(FarmDailyOrder).where(FarmDailyOrder.player_id == player.id, FarmDailyOrder.order_day == today))
+    wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
+    if daily.claimed:
+        raise HTTPException(409, 'Today\'s market delivery is already complete')
+    if not wheat or wheat.amount < 3:
+        raise HTTPException(409, 'Three wheat are required for today\'s market delivery')
+    wheat.amount -= 3
+    daily.claimed = True
+    player.farm_coins += 220
+    player.farm_xp += 60
+    record_farm_ledger(session, player, 'order_daily_wheat_delivery', coins_delta=220, xp_delta=60)
+    await add_competition_points(player, session, 30)
     await record_play(player, session, 'farm')
     await session.commit()
     return {**await farm_state(player, session), **await farm_orders_state(player, session)}

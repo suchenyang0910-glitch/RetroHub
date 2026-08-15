@@ -184,6 +184,34 @@ def test_farm_crop_unlocks_and_inventory_are_server_controlled(monkeypatch):
         assert planted.json()['crops'][1]['unlocked'] is True
         assert client.post('/api/farm/sell/carrot', headers=headers).status_code == 409
 
+def test_daily_order_awards_week_and_month_competition_points(monkeypatch):
+    import asyncio
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.main import FarmStock, Player, Session, app
+    monkeypatch.setenv('DEBUG', 'true')
+    user_id = f'test-daily-order-{uuid4()}'
+    headers = {'X-Telegram-User': user_id}
+    with TestClient(app) as client:
+        client.get('/api/farm/orders', headers=headers)
+
+        async def add_wheat() -> None:
+            async with Session() as session:
+                player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
+                session.add(FarmStock(player_id=player.id, item_key='wheat', amount=3))
+                await session.commit()
+
+        asyncio.run(add_wheat())
+        claimed = client.post('/api/farm/orders/daily_wheat_delivery/claim', headers=headers)
+        assert claimed.status_code == 200
+        assert claimed.json()['orders'][1]['claimed'] is True
+        assert client.post('/api/farm/orders/daily_wheat_delivery/claim', headers=headers).status_code == 409
+        weekly = client.get('/api/leaderboards/farm?period=week', headers=headers)
+        monthly = client.get('/api/leaderboards/farm?period=month', headers=headers)
+        assert weekly.json()['entries'][0]['points'] == 30
+        assert monthly.json()['entries'][0]['is_me'] is True
+
 def test_profile_honors_and_privacy_controls(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient
