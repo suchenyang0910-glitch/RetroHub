@@ -79,6 +79,15 @@ class BehaviorEvent(Base):
     action: Mapped[str] = mapped_column(String(48), index=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
+class SupportTicket(Base):
+    __tablename__ = 'support_tickets'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    game: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(20), default='open', index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class DailyCheckin(Base):
     __tablename__ = 'daily_checkins'
     __table_args__ = (UniqueConstraint('player_id', 'claimed_on', name='uq_daily_checkin'),)
@@ -225,6 +234,7 @@ class FarmAction(BaseModel): crop: str = Field(default='wheat')
 class PrivacyUpdate(BaseModel): farm_public: bool; collection_public: bool
 class VisitorPreferenceUpdate(BaseModel): enabled: bool
 class DataPreferenceUpdate(BaseModel): personalized_recommendations: bool
+class ResetRequest(BaseModel): game: str = Field(pattern='^(farm|pets|cards|all)$')
 
 async def db() -> AsyncIterator[AsyncSession]:
     async with Session() as session: yield session
@@ -551,6 +561,21 @@ async def update_data_preference(update: DataPreferenceUpdate, player: Player = 
     preference.personalized_recommendations = update.personalized_recommendations
     await session.commit()
     return {'personalized_recommendations': preference.personalized_recommendations}
+
+@app.get('/api/support/tickets/me')
+async def get_my_support_tickets(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    tickets = list((await session.scalars(select(SupportTicket).where(SupportTicket.player_id == player.id).order_by(SupportTicket.created_at.desc()))).all())
+    return {'tickets': [{'id': ticket.id, 'category': ticket.category, 'game': ticket.game, 'status': ticket.status, 'created_at': ticket.created_at} for ticket in tickets]}
+
+@app.post('/api/support/reset-request')
+async def request_game_reset(request: ResetRequest, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    existing = await session.scalar(select(SupportTicket).where(SupportTicket.player_id == player.id, SupportTicket.category == 'game_reset', SupportTicket.game == request.game, SupportTicket.status == 'open'))
+    if existing:
+        raise HTTPException(409, 'An open reset request already exists for this game')
+    ticket = SupportTicket(player_id=player.id, category='game_reset', game=request.game, status='open')
+    session.add(ticket)
+    await session.commit()
+    return {'id': ticket.id, 'category': ticket.category, 'game': ticket.game, 'status': ticket.status}
 
 @app.get('/api/friends/invite')
 async def friend_invite(player: Player = Depends(eligible_player)) -> dict:

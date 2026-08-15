@@ -338,6 +338,20 @@ def test_profile_honors_and_privacy_controls(monkeypatch):
         assert preference.json() == {'personalized_recommendations': False}
         assert client.get('/api/profile', headers=headers).json()['personalized_recommendations'] is False
 
+def test_game_reset_is_support_ticket_only(monkeypatch):
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from app.main import app
+    monkeypatch.setenv('DEBUG', 'true')
+    headers = {'X-Telegram-User': f'test-reset-{uuid4()}'}
+    with TestClient(app) as client:
+        created = client.post('/api/support/reset-request', headers=headers, json={'game': 'farm'})
+        assert created.status_code == 200
+        assert created.json()['status'] == 'open'
+        assert client.post('/api/support/reset-request', headers=headers, json={'game': 'farm'}).status_code == 409
+        tickets = client.get('/api/support/tickets/me', headers=headers).json()['tickets']
+        assert tickets[0]['game'] == 'farm'
+
 def test_friends_can_visit_and_water_public_farms(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient
