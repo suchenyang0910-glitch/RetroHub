@@ -352,6 +352,29 @@ def test_game_reset_is_support_ticket_only(monkeypatch):
         tickets = client.get('/api/support/tickets/me', headers=headers).json()['tickets']
         assert tickets[0]['game'] == 'farm'
 
+def test_admin_can_review_tickets_with_password_and_audit(monkeypatch):
+    import asyncio
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.main import AdminAuditLog, Session, app
+    monkeypatch.setenv('DEBUG', 'true')
+    monkeypatch.setenv('ADMIN_USERNAME', 'ops')
+    monkeypatch.setenv('ADMIN_PASSWORD', 'test-admin-password')
+    headers = {'X-Telegram-User': f'test-admin-ticket-{uuid4()}'}
+    with TestClient(app) as client:
+        ticket = client.post('/api/support/reset-request', headers=headers, json={'game': 'pets'}).json()
+        assert client.get('/api/admin/support/tickets').status_code == 401
+        admin_headers = {'X-Admin-Password': 'test-admin-password'}
+        assert client.get('/api/admin/support/tickets', headers=admin_headers).json()['actor'] == 'ops'
+        assert client.put(f"/api/admin/support/tickets/{ticket['id']}", headers=admin_headers, json={'status': 'approved'}).json()['status'] == 'approved'
+
+        async def audit_count() -> int:
+            async with Session() as session:
+                return len(list((await session.scalars(select(AdminAuditLog))).all()))
+
+        assert asyncio.run(audit_count()) == 1
+
 def test_support_faq_is_available_in_supported_locales():
     from fastapi.testclient import TestClient
     from app.main import app

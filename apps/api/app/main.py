@@ -1,4 +1,5 @@
 import os
+import hmac
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import AsyncIterator
@@ -86,6 +87,17 @@ class SupportTicket(Base):
     category: Mapped[str] = mapped_column(String(40), index=True)
     game: Mapped[str] = mapped_column(String(24))
     status: Mapped[str] = mapped_column(String(20), default='open', index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class AdminAuditLog(Base):
+    __tablename__ = 'admin_audit_logs'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target_type: Mapped[str] = mapped_column(String(40))
+    target_id: Mapped[str] = mapped_column(String(64))
+    before_value: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    after_value: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class DailyCheckin(Base):
@@ -252,9 +264,18 @@ class PrivacyUpdate(BaseModel): farm_public: bool; collection_public: bool
 class VisitorPreferenceUpdate(BaseModel): enabled: bool
 class DataPreferenceUpdate(BaseModel): personalized_recommendations: bool
 class ResetRequest(BaseModel): game: str = Field(pattern='^(farm|pets|cards|all)$')
+class TicketStatusUpdate(BaseModel): status: str = Field(pattern='^(open|approved|rejected)$')
 
 async def db() -> AsyncIterator[AsyncSession]:
     async with Session() as session: yield session
+
+async def admin_actor(x_admin_password: str | None = Header(default=None)) -> str:
+    configured_password = os.getenv('ADMIN_PASSWORD')
+    if not configured_password:
+        raise HTTPException(503, 'Admin access is not configured')
+    if not x_admin_password or not hmac.compare_digest(x_admin_password, configured_password):
+        raise HTTPException(401, 'Invalid administrator password')
+    return os.getenv('ADMIN_USERNAME', 'administrator')
 
 async def current_player(
     x_telegram_init_data: str | None = Header(default=None),
@@ -597,6 +618,22 @@ async def request_game_reset(request: ResetRequest, player: Player = Depends(cur
     session.add(ticket)
     await session.commit()
     return {'id': ticket.id, 'category': ticket.category, 'game': ticket.game, 'status': ticket.status}
+
+@app.get('/api/admin/support/tickets')
+async def admin_list_support_tickets(actor: str = Depends(admin_actor), session: AsyncSession = Depends(db)) -> dict:
+    tickets = list((await session.scalars(select(SupportTicket).order_by(SupportTicket.created_at.desc()).limit(100))).all())
+    return {'actor': actor, 'tickets': [{'id': ticket.id, 'player_id': ticket.player_id, 'category': ticket.category, 'game': ticket.game, 'status': ticket.status, 'created_at': ticket.created_at} for ticket in tickets]}
+
+@app.put('/api/admin/support/tickets/{ticket_id}')
+async def admin_update_support_ticket(ticket_id: int, update: TicketStatusUpdate, actor: str = Depends(admin_actor), session: AsyncSession = Depends(db)) -> dict:
+    ticket = await session.get(SupportTicket, ticket_id)
+    if not ticket:
+        raise HTTPException(404, 'Support ticket not found')
+    previous_status = ticket.status
+    ticket.status = update.status
+    session.add(AdminAuditLog(actor=actor, action='update_support_ticket', target_type='support_ticket', target_id=str(ticket.id), before_value=previous_status, after_value=update.status))
+    await session.commit()
+    return {'id': ticket.id, 'status': ticket.status}
 
 @app.get('/api/friends/invite')
 async def friend_invite(player: Player = Depends(eligible_player)) -> dict:
