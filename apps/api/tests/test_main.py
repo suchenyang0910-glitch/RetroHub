@@ -67,6 +67,29 @@ def test_signed_telegram_identity_syncs_name_and_avatar(monkeypatch):
         assert profile.json()['name'] == 'Retro'
         assert profile.json()['avatar_url'] == user['photo_url']
 
+def test_production_age_confirmation_blocks_gameplay_until_confirmed(monkeypatch):
+    import hashlib
+    import hmac
+    import json
+    from datetime import datetime, timezone
+    from urllib.parse import urlencode
+    from fastapi.testclient import TestClient
+    from app.main import app
+    token = 'age-consent-test-token'
+    values = {'auth_date': str(int(datetime.now(timezone.utc).timestamp())), 'user': json.dumps({'id': 99887766, 'first_name': 'Adult'}, separators=(',', ':'))}
+    check = '\n'.join(f'{key}={value}' for key, value in sorted(values.items()))
+    secret = hmac.new(b'WebAppData', token.encode(), hashlib.sha256).digest()
+    values['hash'] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    headers = {'X-Telegram-Init-Data': urlencode(values)}
+    monkeypatch.setenv('DEBUG', 'false')
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', token)
+    with TestClient(app) as client:
+        assert client.get('/api/farm', headers=headers).status_code == 403
+        confirmed = client.post('/api/profile/age-consent', headers=headers)
+        assert confirmed.status_code == 200
+        assert confirmed.json()['age_confirmed'] is True
+        assert client.get('/api/farm', headers=headers).status_code == 200
+
 def test_pet_merge_and_card_crafting_loops(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient

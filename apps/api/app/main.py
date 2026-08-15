@@ -145,6 +145,11 @@ class TelegramIdentity(Base):
     avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class AgeConsent(Base):
+    __tablename__ = 'age_consents'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class VisitorPreference(Base):
     __tablename__ = 'visitor_preferences'
     player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
@@ -234,6 +239,11 @@ async def current_player(
         identity.avatar_url = avatar_url
         identity.synced_at = datetime.now(timezone.utc)
         await session.commit()
+    return player
+
+async def eligible_player(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> Player:
+    if not is_debug() and not await session.get(AgeConsent, player.id):
+        raise HTTPException(403, 'Confirm that you are 18 or older before playing')
     return player
 
 async def get_farm_plot(player: Player, session: AsyncSession) -> FarmPlot:
@@ -386,12 +396,14 @@ async def get_or_create_visitor_preference(player: Player, session: AsyncSession
 async def profile_state(player: Player, session: AsyncSession) -> dict:
     profile = await get_or_create_profile(player, session)
     identity = await session.get(TelegramIdentity, player.id)
+    age_consent = await session.get(AgeConsent, player.id)
     visitor_preference = await get_or_create_visitor_preference(player, session)
     pets = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id))).all())
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id))).all())
     return {
         'name': player.display_name,
         'avatar_url': identity.avatar_url if identity else None,
+        'age_confirmed': bool(age_consent),
         'honors': {'farm_level': player.farm_level, 'highest_pet_tier': max((pet.tier for pet in pets if pet.amount > 0), default=0), 'crafted_cards': len(cards)},
         'privacy': {'farm_public': profile.farm_public, 'collection_public': profile.collection_public},
         'visitor_history_enabled': visitor_preference.enabled,
@@ -435,11 +447,18 @@ async def hub(player: Player = Depends(current_player), session: AsyncSession = 
     return {'title':'RetroHub Test','player':{'name':player.display_name}, 'checkin': await checkin_state(player, session), 'games':[{'id':'farm','state':'open'},{'id':'pet-merge','state':'open'},{'id':'card-arena','state':'open'}]}
 
 @app.get('/api/checkin')
-async def get_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def get_checkin(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     return await checkin_state(player, session)
 
 @app.get('/api/profile')
 async def get_profile(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    return await profile_state(player, session)
+
+@app.post('/api/profile/age-consent')
+async def confirm_age_consent(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    if not await session.get(AgeConsent, player.id):
+        session.add(AgeConsent(player_id=player.id))
+        await session.commit()
     return await profile_state(player, session)
 
 @app.put('/api/profile/privacy')
@@ -471,11 +490,11 @@ async def update_visitor_preference(update: VisitorPreferenceUpdate, player: Pla
     return {'enabled': preference.enabled}
 
 @app.get('/api/friends/invite')
-async def friend_invite(player: Player = Depends(current_player)) -> dict:
+async def friend_invite(player: Player = Depends(eligible_player)) -> dict:
     return {'start_param': f'friend_{player.telegram_id}', 'url': f'https://t.me/GameCenterMini_bot?startapp=friend_{player.telegram_id}'}
 
 @app.post('/api/friends/accept/{friend_telegram_id}')
-async def accept_friend(friend_telegram_id: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def accept_friend(friend_telegram_id: str, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     friend = await friend_target(friend_telegram_id, player, session)
     low, high = sorted((player.id, friend.id))
     if not await friendship_exists(player.id, friend.id, session):
@@ -484,7 +503,7 @@ async def accept_friend(friend_telegram_id: str, player: Player = Depends(curren
     return {'friend': {'telegram_id': friend.telegram_id, 'name': friend.display_name}, 'accepted': True}
 
 @app.get('/api/friends')
-async def get_friends(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def get_friends(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     links = list((await session.scalars(select(Friendship).where((Friendship.player_low_id == player.id) | (Friendship.player_high_id == player.id)))).all())
     friend_ids = [link.player_high_id if link.player_low_id == player.id else link.player_low_id for link in links]
     friends = [await session.get(Player, friend_id) for friend_id in friend_ids]
@@ -497,12 +516,12 @@ async def get_friends(player: Player = Depends(current_player), session: AsyncSe
     return {'friends': result, 'friendship_energy': energy.friendship_energy, 'friendship_energy_cap': friendship_energy_cap(player)}
 
 @app.get('/api/friends/energy')
-async def get_friendship_energy(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def get_friendship_energy(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     energy = await social_state(player, session)
     return {'friendship_energy': energy.friendship_energy, 'friendship_energy_cap': friendship_energy_cap(player)}
 
 @app.get('/api/friends/{friend_telegram_id}/farm')
-async def visit_friend_farm(friend_telegram_id: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def visit_friend_farm(friend_telegram_id: str, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     friend = await friend_target(friend_telegram_id, player, session)
     if not await friendship_exists(player.id, friend.id, session):
         raise HTTPException(403, 'Add this player as a friend first')
@@ -517,7 +536,7 @@ async def visit_friend_farm(friend_telegram_id: str, player: Player = Depends(cu
     return {'owner': friend.display_name, 'farm': {'level': state['level'], 'inventory': state['inventory'], 'plot': state['plot']}}
 
 @app.post('/api/friends/{friend_telegram_id}/help/water')
-async def water_friend_farm(friend_telegram_id: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def water_friend_farm(friend_telegram_id: str, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     friend = await friend_target(friend_telegram_id, player, session)
     if not await friendship_exists(player.id, friend.id, session):
         raise HTTPException(403, 'Add this player as a friend first')
@@ -547,7 +566,7 @@ async def water_friend_farm(friend_telegram_id: str, player: Player = Depends(cu
     return {'owner': friend.display_name, 'help': 'water', 'seconds_saved': seconds_saved, 'relationship_progress': 1, 'friendship_energy': energy.friendship_energy, 'friendship_energy_cap': friendship_energy_cap(player)}
 
 @app.post('/api/checkin/claim')
-async def claim_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def claim_checkin(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     state = await checkin_state(player, session)
     if not state['played_today']:
         raise HTTPException(409, 'Play any game before claiming today\'s reward')
@@ -572,15 +591,15 @@ async def farm_leaderboard(period: str = Query(default='all_time'), player: Play
     return {'period': period, 'period_key': period_key, 'metric': 'order_points', 'entries': entries}
 
 @app.get('/api/farm')
-async def get_farm(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def get_farm(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     return await farm_state(player, session)
 
 @app.get('/api/farm/orders')
-async def get_farm_orders(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def get_farm_orders(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     return await farm_orders_state(player, session)
 
 @app.post('/api/farm/companions/{companion_key}/adopt')
-async def adopt_farm_companion(companion_key: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def adopt_farm_companion(companion_key: str, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     if companion_key not in FARM_COMPANIONS:
         raise HTTPException(422, 'Unsupported companion')
     if await session.get(FarmCompanion, player.id):
@@ -591,7 +610,7 @@ async def adopt_farm_companion(companion_key: str, player: Player = Depends(curr
     return await farm_state(player, session)
 
 @app.post('/api/farm/plant')
-async def plant(action: FarmAction, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def plant(action: FarmAction, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     now = datetime.now(timezone.utc)
     crop = CROPS.get(action.crop)
     if not crop: raise HTTPException(422, 'Unsupported crop')
@@ -607,7 +626,7 @@ async def plant(action: FarmAction, player: Player = Depends(current_player), se
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
 
 @app.post('/api/farm/harvest')
-async def harvest(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def harvest(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     now = datetime.now(timezone.utc)
     plot = await get_farm_plot(player, session)
     ready_at = plot.ready_at
@@ -629,7 +648,7 @@ async def harvest(player: Player = Depends(current_player), session: AsyncSessio
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
 
 @app.post('/api/farm/sell/{crop_key}')
-async def sell_crop(crop_key: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def sell_crop(crop_key: str, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     crop = CROPS.get(crop_key)
     if not crop:
         raise HTTPException(422, 'Unsupported crop')
@@ -644,7 +663,7 @@ async def sell_crop(crop_key: str, player: Player = Depends(current_player), ses
     return await farm_state(player, session)
 
 @app.post('/api/farm/orders/wheat_delivery/claim')
-async def claim_wheat_delivery(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def claim_wheat_delivery(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     await farm_orders_state(player, session)
     order = await session.scalar(select(FarmOrder).where(FarmOrder.player_id == player.id, FarmOrder.order_key == 'wheat_delivery'))
     wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
@@ -665,7 +684,7 @@ async def claim_wheat_delivery(player: Player = Depends(current_player), session
     return {**await farm_state(player, session), **await farm_orders_state(player, session)}
 
 @app.post('/api/farm/orders/daily_wheat_delivery/claim')
-async def claim_daily_wheat_delivery(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def claim_daily_wheat_delivery(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     today = datetime.now(timezone.utc).date()
     daily = await session.scalar(select(FarmDailyOrder).where(FarmDailyOrder.player_id == player.id, FarmDailyOrder.order_day == today))
     if not daily:
@@ -689,11 +708,11 @@ async def claim_daily_wheat_delivery(player: Player = Depends(current_player), s
     return {**await farm_state(player, session), **await farm_orders_state(player, session)}
 
 @app.get('/api/pets')
-async def get_pets(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def get_pets(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     return await pet_state(player, session)
 
 @app.post('/api/pets/idle/claim')
-async def claim_pet_idle(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def claim_pet_idle(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     state = await pet_state(player, session)
     profile = await session.get(PetProfile, player.id)
     profile.coins += state['idle_coins_claimable']
@@ -703,7 +722,7 @@ async def claim_pet_idle(player: Player = Depends(current_player), session: Asyn
     return await pet_state(player, session)
 
 @app.post('/api/pets/eggs/basic')
-async def buy_basic_pet_egg(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def buy_basic_pet_egg(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     await pet_state(player, session)
     profile = await session.get(PetProfile, player.id)
     if profile.coins < 100:
@@ -716,7 +735,7 @@ async def buy_basic_pet_egg(player: Player = Depends(current_player), session: A
     return await pet_state(player, session)
 
 @app.post('/api/pets/merge/{tier}')
-async def merge_pets(tier: int, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def merge_pets(tier: int, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     if tier < 1 or tier > 9:
         raise HTTPException(422, 'Unsupported pet tier')
     await pet_state(player, session)
@@ -734,11 +753,11 @@ async def merge_pets(tier: int, player: Player = Depends(current_player), sessio
     return await pet_state(player, session)
 
 @app.get('/api/cards')
-async def get_cards(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def get_cards(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
 
 @app.post('/api/cards/tower/challenge')
-async def challenge_card_tower(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def challenge_card_tower(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     tower = await card_tower_state(player, session)
     if tower['ended']:
         raise HTTPException(409, 'This week\'s tower run has ended')
@@ -768,7 +787,7 @@ async def card_tower_leaderboard(player: Player = Depends(current_player), sessi
     return {'period': week_key, 'metric': 'tower_points', 'entries': entries}
 
 @app.post('/api/cards/battle')
-async def battle_cards(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def battle_cards(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     player.card_materials += 15
     if player.card_chapter < 12:
         player.card_chapter += 1
@@ -777,7 +796,7 @@ async def battle_cards(player: Player = Depends(current_player), session: AsyncS
     return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
 
 @app.post('/api/cards/craft/{card_key}')
-async def craft_card(card_key: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def craft_card(card_key: str, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
     allowed_cards = {'clockwork_fox', 'river_knight', 'arcade_mage'}
     if card_key not in allowed_cards:
         raise HTTPException(422, 'This card cannot be crafted')

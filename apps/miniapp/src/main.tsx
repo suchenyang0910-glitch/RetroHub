@@ -8,7 +8,7 @@ type Pets = { pets: { tier: number; amount: number }[]; coins: number; productio
 type Cards = { materials: number; chapter: number; cards: { key: string; level: number }[]; tower?: { floor: number; points: number; ended: boolean; strength: number; is_elite_floor: boolean; max_floor: number } };
 type Checkin = { played_today: boolean; claimed_today: boolean; streak: number; can_claim: boolean; collection_awarded?: number };
 type Leaderboard = { period: string; metric: string; entries: { rank: number; name: string; level?: number; xp?: number; points?: number; is_me: boolean }[] };
-type Profile = { name: string; avatar_url: string | null; honors: { farm_level: number; highest_pet_tier: number; crafted_cards: number }; privacy: { farm_public: boolean; collection_public: boolean }; visitor_history_enabled: boolean };
+type Profile = { name: string; avatar_url: string | null; age_confirmed: boolean; honors: { farm_level: number; highest_pet_tier: number; crafted_cards: number }; privacy: { farm_public: boolean; collection_public: boolean }; visitor_history_enabled: boolean };
 type Friend = { telegram_id: string; name: string; avatar_url: string | null; farm_public: boolean };
 type FriendFarm = { owner: string; farm: { level: number; inventory: { wheat: number }; plot: { crop: string | null; ready: boolean } } };
 type Visitors = { enabled: boolean; visitors: { name: string; avatar_url: string | null; visited_at: string }[] };
@@ -59,6 +59,9 @@ function App() {
     return response.json();
   }, []);
   const refresh = React.useCallback(async () => {
+    const profileState = await request('/api/profile');
+    setProfile(profileState);
+    if (!profileState.age_confirmed) return;
     setCheckin(await request('/api/checkin'));
     if (game === 'farm') { setFarm(await request('/api/farm')); setFarmOrders(await request('/api/farm/orders')); }
     if (game === 'pets') setPets(await request('/api/pets'));
@@ -83,6 +86,7 @@ function App() {
   const loadLeaderboard = async (period = 'all_time') => { try { setLeaderboard(await request(`/api/leaderboards/farm?period=${period}`)); } catch (error) { notify(error instanceof Error ? error.message : 'Leaderboard unavailable'); } };
   const loadProfile = async () => { try { const [profileState, visitorState] = await Promise.all([request('/api/profile'), request('/api/profile/visitors')]); setProfile(profileState); setVisitors(visitorState); } catch (error) { notify(error instanceof Error ? error.message : 'Profile unavailable'); } };
   const updatePrivacy = async (farmPublic: boolean, collectionPublic: boolean) => { try { const response = await fetch('/api/profile/privacy', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ farm_public: farmPublic, collection_public: collectionPublic }) }); if (!response.ok) throw new Error('Privacy update unavailable'); setProfile(await response.json()); } catch (error) { notify(error instanceof Error ? error.message : 'Privacy update unavailable'); } };
+  const confirmAge = async () => { try { const response = await fetch('/api/profile/age-consent', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() } }); if (!response.ok) throw new Error('Age confirmation unavailable'); setProfile(await response.json()); await refresh(); } catch (error) { notify(error instanceof Error ? error.message : 'Age confirmation unavailable'); } };
   const plantCrop = async (crop: string) => { try { const response = await fetch('/api/farm/plant', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ crop }) }); if (!response.ok) { const data = await response.json(); throw new Error(data.detail || 'Planting unavailable'); } setFarm(await response.json()); setFarmOrders(await request('/api/farm/orders')); notify(`${crop} planted.`); } catch (error) { notify(error instanceof Error ? error.message : 'Planting unavailable'); } };
   const updateVisitorHistory = async (enabled: boolean) => { try { const response = await fetch('/api/profile/visitors', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ enabled }) }); if (!response.ok) throw new Error('Visitor preference unavailable'); const next = await response.json(); setVisitors({ enabled: next.enabled, visitors: next.enabled ? visitors?.visitors || [] : [] }); setProfile(profile ? { ...profile, visitor_history_enabled: next.enabled } : profile); } catch (error) { notify(error instanceof Error ? error.message : 'Visitor preference unavailable'); } };
   const loadFriends = async () => { try { const [list, invite] = await Promise.all([request('/api/friends'), request('/api/friends/invite')]); setFriends(list.friends); setFriendshipEnergy({ current: list.friendship_energy, cap: list.friendship_energy_cap }); setInviteUrl(invite.url); } catch (error) { notify(error instanceof Error ? error.message : 'Friends unavailable'); } };
@@ -101,6 +105,7 @@ function App() {
     : game === 'pets' ? (pets ? `${pets.pets.reduce((total, pet) => total + pet.amount, 0)} pets in your collection` : 'Syncing collection...')
       : (cards ? `Chapter ${cards.chapter} · ${cards.materials} materials` : 'Syncing card collection...');
   const checkinMessage = !checkin ? t.syncCheckin : checkin.claimed_today ? `${checkin.streak} ${t.streak}` : checkin.played_today ? t.readyCheckin : t.unlockCheckin;
+  if (profile && !profile.age_confirmed) return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>Age confirmation</h1></div></header><section className="detail-panel"><b>18+ required</b><p>Confirm that you are 18 years of age or older to enter RetroHub and start playing.</p><button onClick={() => void confirmAge()}>I am 18 or older</button></section>{toast && <div role="status" className="toast">{toast}</div>}</main>;
   return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>{gameMeta[game].title}</h1></div><button className="avatar" aria-label="Telegram profile" onClick={() => changeLocale(locale === 'en' ? 'zh' : locale === 'zh' ? 'ru' : 'en')}>{locale.toUpperCase()}</button></header>
     <section className="daily"><div><span>{t.checkin}</span><strong>{checkinMessage}</strong></div><button disabled={!checkin?.can_claim} onClick={() => void claimCheckin()}>{checkin?.claimed_today ? t.claimed : t.claim}</button></section>
     <section className="game-status"><span>{t.core}</span><strong>{status}</strong><button onClick={action.run}>{action.text}</button></section>
