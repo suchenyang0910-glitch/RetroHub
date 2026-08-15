@@ -64,6 +64,13 @@ class CardTowerRun(Base):
     points: Mapped[int] = mapped_column(Integer, default=0)
     ended: Mapped[bool] = mapped_column(default=False)
 
+class CardBattleRun(Base):
+    __tablename__ = 'card_battle_runs'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    player_hp: Mapped[int] = mapped_column(Integer, default=12)
+    enemy_hp: Mapped[int] = mapped_column(Integer, default=12)
+    turn: Mapped[int] = mapped_column(Integer, default=1)
+
 class GameActivity(Base):
     __tablename__ = 'game_activities'
     __table_args__ = (UniqueConstraint('player_id', 'game', 'played_on', name='uq_daily_game_activity'),)
@@ -448,6 +455,13 @@ async def pet_state(player: Player, session: AsyncSession) -> dict:
 async def card_state(player: Player, session: AsyncSession) -> dict:
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id).order_by(Card.card_key))).all())
     return {'materials': player.card_materials, 'chapter': player.card_chapter, 'cards': [{'key': card.card_key, 'level': card.level} for card in cards]}
+
+async def card_battle_state(player: Player, session: AsyncSession) -> dict:
+    run = await session.get(CardBattleRun, player.id)
+    if not run:
+        run = CardBattleRun(player_id=player.id)
+        session.add(run); await session.commit()
+    return {'player_hp': run.player_hp, 'enemy_hp': run.enemy_hp, 'turn': run.turn, 'choices': ['strike', 'guard', 'focus']}
 
 def current_week_key() -> str:
     year, week, _ = datetime.now(timezone.utc).date().isocalendar()
@@ -954,7 +968,7 @@ async def merge_pets(tier: int, player: Player = Depends(eligible_player), sessi
 
 @app.get('/api/cards')
 async def get_cards(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
-    return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
+    return {**await card_state(player, session), 'tower': await card_tower_state(player, session), 'battle': await card_battle_state(player, session)}
 
 @app.post('/api/cards/tower/challenge')
 async def challenge_card_tower(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
@@ -987,13 +1001,23 @@ async def card_tower_leaderboard(player: Player = Depends(current_player), sessi
     return {'period': week_key, 'metric': 'tower_points', 'entries': entries}
 
 @app.post('/api/cards/battle')
-async def battle_cards(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
-    player.card_materials += 15
-    if player.card_chapter < 12:
-        player.card_chapter += 1
-    await record_play(player, session, 'card-arena', 'pve_chapter')
+@app.post('/api/cards/battle/{choice}')
+async def battle_cards(choice: str = 'strike', player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
+    if choice not in {'strike', 'guard', 'focus'}: raise HTTPException(422, 'Unsupported battle choice')
+    run = await session.get(CardBattleRun, player.id) or CardBattleRun(player_id=player.id, player_hp=12, enemy_hp=12, turn=1)
+    if not await session.get(CardBattleRun, player.id): session.add(run)
+    damage = {'strike': 4, 'guard': 2, 'focus': 3}[choice]
+    enemy_damage = 2 if choice == 'guard' else 3
+    run.enemy_hp -= damage; run.player_hp -= enemy_damage; run.turn += 1
+    result = 'ongoing'
+    if run.enemy_hp <= 0:
+        player.card_materials += 15; player.card_chapter = min(12, player.card_chapter + 1)
+        run.player_hp = 12; run.enemy_hp = 12 + min(6, player.card_chapter); run.turn = 1; result = 'victory'
+    elif run.player_hp <= 0:
+        run.player_hp = 12; run.enemy_hp = 12; run.turn = 1; result = 'defeat'
+    await record_play(player, session, 'card-arena', f'pve_{choice}')
     await session.commit()
-    return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
+    return {**await card_state(player, session), 'tower': await card_tower_state(player, session), 'battle': await card_battle_state(player, session), 'result': result}
 
 @app.post('/api/cards/craft/{card_key}')
 async def craft_card(card_key: str, player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:
