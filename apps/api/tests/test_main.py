@@ -112,6 +112,26 @@ def test_pet_idle_income_and_basic_egg_use_pet_currency(monkeypatch):
         assert bought['coins'] == 412
         assert bought['pets'][0]['amount'] == 7
 
+def test_card_tower_has_retryable_normal_floors_and_weekly_points(monkeypatch):
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from app.main import app
+    monkeypatch.setenv('DEBUG', 'true')
+    headers = {'X-Telegram-User': f'test-tower-{uuid4()}'}
+    with TestClient(app) as client:
+        initial = client.get('/api/cards', headers=headers).json()
+        assert initial['tower']['floor'] == 1
+        first = client.post('/api/cards/tower/challenge', headers=headers).json()
+        assert first['result'] == 'victory'
+        assert first['tower']['points'] == 10
+        assert client.post('/api/cards/tower/challenge', headers=headers).json()['result'] == 'victory'
+        assert client.post('/api/cards/tower/challenge', headers=headers).json()['result'] == 'retry'
+        assert client.post('/api/cards/craft/clockwork_fox', headers=headers).status_code == 200
+        third = client.post('/api/cards/tower/challenge', headers=headers).json()
+        assert third['result'] == 'victory'
+        leaderboard = client.get('/api/leaderboards/cards/tower', headers=headers).json()
+        assert leaderboard['entries'][0]['is_me'] is True
+
 def test_daily_checkin_requires_play_and_leaderboard(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient

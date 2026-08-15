@@ -53,6 +53,16 @@ class Card(Base):
     card_key: Mapped[str] = mapped_column(String(40))
     level: Mapped[int] = mapped_column(Integer, default=1)
 
+class CardTowerRun(Base):
+    __tablename__ = 'card_tower_runs'
+    __table_args__ = (UniqueConstraint('player_id', 'week_key', name='uq_card_tower_week'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    week_key: Mapped[str] = mapped_column(String(16), index=True)
+    floor: Mapped[int] = mapped_column(Integer, default=1)
+    points: Mapped[int] = mapped_column(Integer, default=0)
+    ended: Mapped[bool] = mapped_column(default=False)
+
 class GameActivity(Base):
     __tablename__ = 'game_activities'
     __table_args__ = (UniqueConstraint('player_id', 'game', 'played_on', name='uq_daily_game_activity'),)
@@ -305,6 +315,21 @@ async def pet_state(player: Player, session: AsyncSession) -> dict:
 async def card_state(player: Player, session: AsyncSession) -> dict:
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id).order_by(Card.card_key))).all())
     return {'materials': player.card_materials, 'chapter': player.card_chapter, 'cards': [{'key': card.card_key, 'level': card.level} for card in cards]}
+
+def current_week_key() -> str:
+    year, week, _ = datetime.now(timezone.utc).date().isocalendar()
+    return f'{year}-W{week:02d}'
+
+async def card_tower_state(player: Player, session: AsyncSession) -> dict:
+    week_key = current_week_key()
+    run = await session.scalar(select(CardTowerRun).where(CardTowerRun.player_id == player.id, CardTowerRun.week_key == week_key))
+    if not run:
+        run = CardTowerRun(player_id=player.id, week_key=week_key)
+        session.add(run)
+        await session.commit()
+    cards = list((await session.scalars(select(Card).where(Card.player_id == player.id))).all())
+    strength = 1 + len(cards) + sum(max(0, card.level - 1) for card in cards)
+    return {'week_key': week_key, 'floor': run.floor, 'points': run.points, 'ended': run.ended, 'strength': strength, 'is_elite_floor': run.floor >= 5, 'max_floor': 10}
 
 async def record_play(player: Player, session: AsyncSession, game: str) -> None:
     today = datetime.now(timezone.utc).date()
@@ -673,7 +698,37 @@ async def merge_pets(tier: int, player: Player = Depends(current_player), sessio
 
 @app.get('/api/cards')
 async def get_cards(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
-    return await card_state(player, session)
+    return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
+
+@app.post('/api/cards/tower/challenge')
+async def challenge_card_tower(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    tower = await card_tower_state(player, session)
+    if tower['ended']:
+        raise HTTPException(409, 'This week\'s tower run has ended')
+    run = await session.scalar(select(CardTowerRun).where(CardTowerRun.player_id == player.id, CardTowerRun.week_key == tower['week_key']))
+    required_strength = (run.floor + 1) // 2
+    if tower['strength'] < required_strength:
+        if run.floor >= 5:
+            run.ended = True
+            await session.commit()
+            return {**await card_state(player, session), 'tower': await card_tower_state(player, session), 'result': 'elite_failed', 'reward_materials': 0}
+        return {**await card_state(player, session), 'tower': tower, 'result': 'retry', 'reward_materials': 0}
+    reward = 10 + run.floor * 5
+    player.card_materials += reward
+    run.points += run.floor * 10
+    run.floor += 1
+    if run.floor > 10:
+        run.ended = True
+    await record_play(player, session, 'card-arena')
+    await session.commit()
+    return {**await card_state(player, session), 'tower': await card_tower_state(player, session), 'result': 'victory', 'reward_materials': reward}
+
+@app.get('/api/leaderboards/cards/tower')
+async def card_tower_leaderboard(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    week_key = current_week_key()
+    rows = (await session.execute(select(CardTowerRun, Player).join(Player, CardTowerRun.player_id == Player.id).where(CardTowerRun.week_key == week_key).order_by(CardTowerRun.points.desc(), CardTowerRun.floor.desc(), Player.id.asc()).limit(20))).all()
+    entries = [{'rank': index + 1, 'name': row.Player.display_name, 'points': row.CardTowerRun.points, 'floor': row.CardTowerRun.floor, 'is_me': row.Player.id == player.id} for index, row in enumerate(rows)]
+    return {'period': week_key, 'metric': 'tower_points', 'entries': entries}
 
 @app.post('/api/cards/battle')
 async def battle_cards(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
@@ -682,7 +737,7 @@ async def battle_cards(player: Player = Depends(current_player), session: AsyncS
         player.card_chapter += 1
     await record_play(player, session, 'card-arena')
     await session.commit()
-    return await card_state(player, session)
+    return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
 
 @app.post('/api/cards/craft/{card_key}')
 async def craft_card(card_key: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
@@ -700,4 +755,4 @@ async def craft_card(card_key: str, player: Player = Depends(current_player), se
         session.add(Card(player_id=player.id, card_key=card_key, level=1))
     await record_play(player, session, 'card-arena')
     await session.commit()
-    return await card_state(player, session)
+    return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
