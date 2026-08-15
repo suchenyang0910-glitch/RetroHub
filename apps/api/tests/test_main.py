@@ -206,7 +206,7 @@ def test_farm_harvest_then_sell_writes_server_ledger(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient
     from sqlalchemy import select
-    from app.main import FarmPlot, Player, Session, app
+    from app.main import BehaviorEvent, FarmPlot, Player, Session, app
     monkeypatch.setenv('DEBUG', 'true')
     user_id = f'test-sell-{uuid4()}'
     headers = {'X-Telegram-User': user_id}
@@ -230,6 +230,13 @@ def test_farm_harvest_then_sell_writes_server_ledger(monkeypatch):
         assert sold.json()['coins'] == 1025
         assert sold.json()['ledger'][0] == {'type': 'sell_wheat', 'coins_delta': 45, 'xp_delta': 0}
         assert client.get('/api/onboarding', headers=headers).json()['completed'] is True
+
+        async def event_actions() -> list[str]:
+            async with Session() as session:
+                player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
+                return list((await session.scalars(select(BehaviorEvent.action).where(BehaviorEvent.player_id == player.id).order_by(BehaviorEvent.id))).all())
+
+        assert asyncio.run(event_actions()) == ['plant_crop', 'harvest_crop', 'sell_crop']
 
 def test_farm_crop_unlocks_and_inventory_are_server_controlled(monkeypatch):
     import asyncio

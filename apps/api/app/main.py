@@ -71,6 +71,14 @@ class GameActivity(Base):
     game: Mapped[str] = mapped_column(String(32))
     played_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(timezone.utc).date())
 
+class BehaviorEvent(Base):
+    __tablename__ = 'behavior_events'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    game: Mapped[str] = mapped_column(String(32), index=True)
+    action: Mapped[str] = mapped_column(String(48), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
 class DailyCheckin(Base):
     __tablename__ = 'daily_checkins'
     __table_args__ = (UniqueConstraint('player_id', 'claimed_on', name='uq_daily_checkin'),)
@@ -393,11 +401,12 @@ async def card_tower_state(player: Player, session: AsyncSession) -> dict:
     strength = 1 + len(cards) + sum(max(0, card.level - 1) for card in cards)
     return {'week_key': week_key, 'floor': run.floor, 'points': run.points, 'ended': run.ended, 'strength': strength, 'is_elite_floor': run.floor >= 5, 'max_floor': 10}
 
-async def record_play(player: Player, session: AsyncSession, game: str) -> None:
+async def record_play(player: Player, session: AsyncSession, game: str, action: str = 'play') -> None:
     today = datetime.now(timezone.utc).date()
     activity = await session.scalar(select(GameActivity).where(GameActivity.player_id == player.id, GameActivity.game == game, GameActivity.played_on == today))
     if not activity:
         session.add(GameActivity(player_id=player.id, game=game, played_on=today))
+    session.add(BehaviorEvent(player_id=player.id, game=game, action=action))
 
 async def checkin_state(player: Player, session: AsyncSession) -> dict:
     today = datetime.now(timezone.utc).date()
@@ -659,7 +668,7 @@ async def adopt_farm_companion(companion_key: str, player: Player = Depends(elig
     if await session.get(FarmCompanion, player.id):
         raise HTTPException(409, 'A farm companion has already been adopted')
     session.add(FarmCompanion(player_id=player.id, companion_key=companion_key))
-    await record_play(player, session, 'farm')
+    await record_play(player, session, 'farm', 'adopt_companion')
     await session.commit()
     return await farm_state(player, session)
 
@@ -677,7 +686,7 @@ async def plant(action: FarmAction, player: Player = Depends(eligible_player), s
     player.farm_coins -= crop['seed_cost']; plot.crop = action.crop; plot.ready_at = now + timedelta(seconds=grow_seconds)
     record_farm_ledger(session, player, f'plant_{action.crop}', coins_delta=-crop['seed_cost'])
     await advance_onboarding(player, session, 'plant')
-    await record_play(player, session, 'farm')
+    await record_play(player, session, 'farm', 'plant_crop')
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
 
 @app.post('/api/farm/harvest')
@@ -699,7 +708,7 @@ async def harvest(player: Player = Depends(eligible_player), session: AsyncSessi
     stock.amount += crop['yield_amount'] + (1 if companion and companion.companion_key == 'cat' else 0)
     record_farm_ledger(session, player, f'harvest_{crop_key}', xp_delta=crop['xp'])
     await advance_onboarding(player, session, 'harvest')
-    await record_play(player, session, 'farm')
+    await record_play(player, session, 'farm', 'harvest_crop')
     if player.farm_xp >= player.farm_level * 30: player.farm_level += 1; player.farm_xp = 0
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
 
@@ -715,7 +724,7 @@ async def sell_crop(crop_key: str, player: Player = Depends(eligible_player), se
     player.farm_coins += crop['sell_price']
     record_farm_ledger(session, player, f'sell_{crop_key}', coins_delta=crop['sell_price'])
     await advance_onboarding(player, session, 'sell')
-    await record_play(player, session, 'farm')
+    await record_play(player, session, 'farm', 'sell_crop')
     await session.commit()
     return await farm_state(player, session)
 
@@ -736,7 +745,7 @@ async def claim_wheat_delivery(player: Player = Depends(eligible_player), sessio
     player.farm_xp += 40
     record_farm_ledger(session, player, 'order_wheat_delivery', coins_delta=coin_reward, xp_delta=40)
     await add_competition_points(player, session, 10)
-    await record_play(player, session, 'farm')
+    await record_play(player, session, 'farm', 'claim_starter_order')
     await session.commit()
     return {**await farm_state(player, session), **await farm_orders_state(player, session)}
 
@@ -760,7 +769,7 @@ async def claim_daily_wheat_delivery(player: Player = Depends(eligible_player), 
     player.farm_xp += 60
     record_farm_ledger(session, player, 'order_daily_wheat_delivery', coins_delta=coin_reward, xp_delta=60)
     await add_competition_points(player, session, 30)
-    await record_play(player, session, 'farm')
+    await record_play(player, session, 'farm', 'claim_daily_order')
     await session.commit()
     return {**await farm_state(player, session), **await farm_orders_state(player, session)}
 
@@ -774,7 +783,7 @@ async def claim_pet_idle(player: Player = Depends(eligible_player), session: Asy
     profile = await session.get(PetProfile, player.id)
     profile.coins += state['idle_coins_claimable']
     profile.last_idle_claim_at = datetime.now(timezone.utc)
-    await record_play(player, session, 'pet-merge')
+    await record_play(player, session, 'pet-merge', 'claim_idle_income')
     await session.commit()
     return await pet_state(player, session)
 
@@ -787,7 +796,7 @@ async def buy_basic_pet_egg(player: Player = Depends(eligible_player), session: 
     stack = await session.scalar(select(PetStack).where(PetStack.player_id == player.id, PetStack.tier == 1))
     profile.coins -= 100
     stack.amount += 1
-    await record_play(player, session, 'pet-merge')
+    await record_play(player, session, 'pet-merge', 'buy_basic_egg')
     await session.commit()
     return await pet_state(player, session)
 
@@ -805,7 +814,7 @@ async def merge_pets(tier: int, player: Player = Depends(eligible_player), sessi
         session.add(target)
     source.amount -= 2
     target.amount += 1
-    await record_play(player, session, 'pet-merge')
+    await record_play(player, session, 'pet-merge', 'merge_pet')
     await session.commit()
     return await pet_state(player, session)
 
@@ -832,7 +841,7 @@ async def challenge_card_tower(player: Player = Depends(eligible_player), sessio
     run.floor += 1
     if run.floor > 10:
         run.ended = True
-    await record_play(player, session, 'card-arena')
+    await record_play(player, session, 'card-arena', 'tower_victory')
     await session.commit()
     return {**await card_state(player, session), 'tower': await card_tower_state(player, session), 'result': 'victory', 'reward_materials': reward}
 
@@ -848,7 +857,7 @@ async def battle_cards(player: Player = Depends(eligible_player), session: Async
     player.card_materials += 15
     if player.card_chapter < 12:
         player.card_chapter += 1
-    await record_play(player, session, 'card-arena')
+    await record_play(player, session, 'card-arena', 'pve_chapter')
     await session.commit()
     return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
 
@@ -866,6 +875,6 @@ async def craft_card(card_key: str, player: Player = Depends(eligible_player), s
         card.level += 1
     else:
         session.add(Card(player_id=player.id, card_key=card_key, level=1))
-    await record_play(player, session, 'card-arena')
+    await record_play(player, session, 'card-arena', 'craft_card')
     await session.commit()
     return {**await card_state(player, session), 'tower': await card_tower_state(player, session)}
