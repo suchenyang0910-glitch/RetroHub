@@ -61,7 +61,12 @@ function App() {
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200); };
   const request = React.useCallback(async (path: string, method = 'GET') => {
     const response = await fetch(path, { method, headers: { ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}), ...headers() } });
-    if (!response.ok) { const data = await response.json(); throw new Error(data.detail || 'Action unavailable'); }
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const error = new Error(data.detail || 'Action unavailable') as Error & { status?: number };
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   }, []);
   const refresh = React.useCallback(async () => {
@@ -78,7 +83,17 @@ function App() {
     let active = true;
     getTelegram()?.ready();
     getTelegram()?.expand();
-    const load = async () => { try { await refresh(); if (active) setAuthError(false); } catch { if (active) setAuthError(true); } };
+    const load = async () => {
+      try {
+        await refresh();
+        if (active) setAuthError(false);
+      } catch (error) {
+        // A slow refresh or a temporary API error must not masquerade as a Telegram login error.
+        // Only the API's explicit authentication responses show the Telegram launch guidance.
+        const status = (error as Error & { status?: number }).status;
+        if (active && (status === 401 || status === 403)) setAuthError(true);
+      }
+    };
     void load();
     const timer = window.setInterval(() => { void load(); }, 15_000);
     return () => { active = false; window.clearInterval(timer); };
