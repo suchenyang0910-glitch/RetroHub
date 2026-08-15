@@ -61,3 +61,21 @@ def test_pet_merge_and_card_crafting_loops(monkeypatch):
         crafted = client.post('/api/cards/craft/clockwork_fox', headers=headers)
         assert crafted.status_code == 200
         assert crafted.json()['cards'][0]['key'] == 'clockwork_fox'
+
+def test_daily_checkin_requires_play_and_leaderboard(monkeypatch):
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from app.main import app
+    monkeypatch.setenv('DEBUG', 'true')
+    headers = {'X-Telegram-User': f'test-checkin-{uuid4()}'}
+    with TestClient(app) as client:
+        assert client.post('/api/checkin/claim', headers=headers).status_code == 409
+        assert client.post('/api/farm/plant', headers=headers, json={'crop': 'wheat'}).status_code == 200
+        claimed = client.post('/api/checkin/claim', headers=headers)
+        assert claimed.status_code == 200
+        assert claimed.json()['claimed_today'] is True
+        assert claimed.json()['collection_awarded'] == 1
+        assert client.post('/api/checkin/claim', headers=headers).status_code == 409
+        leaderboard = client.get('/api/leaderboards/farm', headers=headers)
+        assert leaderboard.status_code == 200
+        assert any(entry['is_me'] for entry in leaderboard.json()['entries'])

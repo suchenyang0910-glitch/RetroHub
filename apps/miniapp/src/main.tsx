@@ -5,6 +5,7 @@ import './styles.css';
 type Farm = { level: number; xp: number; coins: number; diamonds: number; plot: { crop: string | null; ready: boolean } };
 type Pets = { pets: { tier: number; amount: number }[] };
 type Cards = { materials: number; chapter: number; cards: { key: string; level: number }[] };
+type Checkin = { played_today: boolean; claimed_today: boolean; streak: number; can_claim: boolean; collection_awarded?: number };
 type Game = 'farm' | 'pets' | 'cards';
 const getTelegram = () => (window as any).Telegram?.WebApp;
 const headers = (): Record<string, string> => { const initData = getTelegram()?.initData as string | undefined; return initData ? { 'X-Telegram-Init-Data': initData } : {}; };
@@ -19,6 +20,7 @@ function App() {
   const [farm, setFarm] = React.useState<Farm | null>(null);
   const [pets, setPets] = React.useState<Pets | null>(null);
   const [cards, setCards] = React.useState<Cards | null>(null);
+  const [checkin, setCheckin] = React.useState<Checkin | null>(null);
   const [toast, setToast] = React.useState('');
   const [authError, setAuthError] = React.useState(false);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200); };
@@ -28,6 +30,7 @@ function App() {
     return response.json();
   }, []);
   const refresh = React.useCallback(async () => {
+    setCheckin(await request('/api/checkin'));
     if (game === 'farm') setFarm(await request('/api/farm'));
     if (game === 'pets') setPets(await request('/api/pets'));
     if (game === 'cards') setCards(await request('/api/cards'));
@@ -42,6 +45,7 @@ function App() {
     return () => { active = false; window.clearInterval(timer); };
   }, [refresh]);
   const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') setFarm(data); if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
+  const claimCheckin = async () => { try { const data = await request('/api/checkin/claim', 'POST'); setCheckin(data); notify(`Check-in complete. +${data.collection_awarded} memory card${data.collection_awarded > 1 ? 's' : ''}.`); } catch (error) { notify(error instanceof Error ? error.message : 'Check-in unavailable'); } };
   const farmReady = farm?.plot.crop && farm.plot.ready;
   const petTier = pets?.pets.find((pet) => pet.amount >= 2)?.tier;
   const select = (next: Game) => { setGame(next); setToast('Loading ' + gameMeta[next].title + '...'); };
@@ -53,8 +57,10 @@ function App() {
   const status = authError ? 'Open this Mini App from Telegram to authenticate.' : game === 'farm' ? (farm ? `${farm.coins} coins · ${farm.diamonds} diamonds · ${farm.xp} XP` : 'Syncing farm...')
     : game === 'pets' ? (pets ? `${pets.pets.reduce((total, pet) => total + pet.amount, 0)} pets in your collection` : 'Syncing collection...')
       : (cards ? `Chapter ${cards.chapter} · ${cards.materials} materials` : 'Syncing card collection...');
+  const checkinMessage = !checkin ? 'Syncing daily reward...' : checkin.claimed_today ? `Day ${checkin.streak} streak complete` : checkin.played_today ? 'Play recorded. Claim your memory card.' : 'Play any game to unlock today\'s reward.';
   return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>{gameMeta[game].title}</h1></div><button className="avatar" aria-label="Telegram profile">@</button></header>
-    <section className="daily"><div><span>CORE GAMEPLAY</span><strong>{status}</strong></div><button onClick={action.run}>{action.text}</button></section>
+    <section className="daily"><div><span>DAILY CHECK-IN</span><strong>{checkinMessage}</strong></div><button disabled={!checkin?.can_claim} onClick={() => void claimCheckin()}>{checkin?.claimed_today ? 'Claimed' : 'Claim'}</button></section>
+    <section className="game-status"><span>CORE GAMEPLAY</span><strong>{status}</strong><button onClick={action.run}>{action.text}</button></section>
     <section className="section-title"><h2>Your game hall</h2><span>All games open</span></section>
     <section className="cards">{(Object.keys(gameMeta) as Game[]).map((id) => <article className={`game-card ${gameMeta[id].tone} ${game === id ? 'selected' : ''}`} key={id}><div className="icon">{gameMeta[id].label}</div><div className="copy"><h3>{gameMeta[id].title}</h3><p>{gameMeta[id].description}</p></div><button className={game === id ? 'ghost' : ''} onClick={() => select(id)}>{game === id ? 'Playing' : 'Play'}</button></article>)}</section>
     {game === 'pets' && pets && <section className="detail-panel"><b>Pet board</b><p>{pets.pets.map((pet) => `Tier ${pet.tier}: ${pet.amount}`).join(' · ')}</p></section>}

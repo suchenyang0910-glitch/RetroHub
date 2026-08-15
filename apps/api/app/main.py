@@ -1,11 +1,11 @@
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint, select
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -46,6 +46,22 @@ class Card(Base):
     player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
     card_key: Mapped[str] = mapped_column(String(40))
     level: Mapped[int] = mapped_column(Integer, default=1)
+
+class GameActivity(Base):
+    __tablename__ = 'game_activities'
+    __table_args__ = (UniqueConstraint('player_id', 'game', 'played_on', name='uq_daily_game_activity'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    game: Mapped[str] = mapped_column(String(32))
+    played_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(timezone.utc).date())
+
+class DailyCheckin(Base):
+    __tablename__ = 'daily_checkins'
+    __table_args__ = (UniqueConstraint('player_id', 'claimed_on', name='uq_daily_checkin'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    claimed_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(timezone.utc).date())
+    collection_awarded: Mapped[int] = mapped_column(Integer, default=1)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -104,12 +120,51 @@ async def card_state(player: Player, session: AsyncSession) -> dict:
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id).order_by(Card.card_key))).all())
     return {'materials': player.card_materials, 'chapter': player.card_chapter, 'cards': [{'key': card.card_key, 'level': card.level} for card in cards]}
 
+async def record_play(player: Player, session: AsyncSession, game: str) -> None:
+    today = datetime.now(timezone.utc).date()
+    activity = await session.scalar(select(GameActivity).where(GameActivity.player_id == player.id, GameActivity.game == game, GameActivity.played_on == today))
+    if not activity:
+        session.add(GameActivity(player_id=player.id, game=game, played_on=today))
+
+async def checkin_state(player: Player, session: AsyncSession) -> dict:
+    today = datetime.now(timezone.utc).date()
+    played_today = bool(await session.scalar(select(GameActivity.id).where(GameActivity.player_id == player.id, GameActivity.played_on == today)))
+    claimed_days = set((await session.scalars(select(DailyCheckin.claimed_on).where(DailyCheckin.player_id == player.id))).all())
+    streak = 0
+    cursor = today
+    while cursor in claimed_days:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return {'played_today': played_today, 'claimed_today': today in claimed_days, 'streak': streak, 'can_claim': played_today and today not in claimed_days}
+
 @app.get('/health', response_model=Health)
 async def health() -> Health: return Health(status='ok', service='retrohub-api', timestamp=datetime.now(timezone.utc))
 
 @app.get('/api/hub')
-async def hub(player: Player = Depends(current_player)) -> dict:
-    return {'title':'RetroHub Test','player':{'name':player.display_name},'games':[{'id':'farm','state':'open'},{'id':'pet-merge','state':'coming_soon'},{'id':'card-arena','state':'coming_soon'}]}
+async def hub(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    return {'title':'RetroHub Test','player':{'name':player.display_name}, 'checkin': await checkin_state(player, session), 'games':[{'id':'farm','state':'open'},{'id':'pet-merge','state':'open'},{'id':'card-arena','state':'open'}]}
+
+@app.get('/api/checkin')
+async def get_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    return await checkin_state(player, session)
+
+@app.post('/api/checkin/claim')
+async def claim_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    state = await checkin_state(player, session)
+    if not state['played_today']:
+        raise HTTPException(409, 'Play any game before claiming today\'s reward')
+    if state['claimed_today']:
+        raise HTTPException(409, 'Today\'s check-in is already claimed')
+    reward = 5 if state['streak'] == 6 else 1
+    session.add(DailyCheckin(player_id=player.id, claimed_on=datetime.now(timezone.utc).date(), collection_awarded=reward))
+    await session.commit()
+    return {**await checkin_state(player, session), 'collection_awarded': reward}
+
+@app.get('/api/leaderboards/farm')
+async def farm_leaderboard(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    players = list((await session.scalars(select(Player).order_by(Player.farm_level.desc(), Player.farm_xp.desc(), Player.id.asc()).limit(20))).all())
+    entries = [{'rank': index + 1, 'name': row.display_name, 'level': row.farm_level, 'xp': row.farm_xp, 'is_me': row.id == player.id} for index, row in enumerate(players)]
+    return {'period': 'all_time', 'metric': 'farm_level', 'entries': entries}
 
 @app.get('/api/farm')
 async def get_farm(player: Player = Depends(current_player)) -> dict: return farm_state(player)
@@ -121,6 +176,7 @@ async def plant(_: FarmAction, player: Player = Depends(current_player), session
     if player.farm_coins < 20: raise HTTPException(409, 'Not enough coins')
     from datetime import timedelta
     player.farm_coins -= 20; player.wheat_ready_at = now + timedelta(seconds=20)
+    await record_play(player, session, 'farm')
     await session.commit(); await session.refresh(player); return farm_state(player)
 
 @app.post('/api/farm/harvest')
@@ -131,6 +187,7 @@ async def harvest(player: Player = Depends(current_player), session: AsyncSessio
         ready_at = ready_at.replace(tzinfo=timezone.utc)
     if not ready_at or ready_at > now: raise HTTPException(409, 'Crop is not ready')
     player.wheat_ready_at = None; player.farm_coins += 45; player.farm_xp += 10
+    await record_play(player, session, 'farm')
     if player.farm_xp >= player.farm_level * 30: player.farm_level += 1; player.farm_xp = 0
     await session.commit(); await session.refresh(player); return farm_state(player)
 
@@ -152,6 +209,7 @@ async def merge_pets(tier: int, player: Player = Depends(current_player), sessio
         session.add(target)
     source.amount -= 2
     target.amount += 1
+    await record_play(player, session, 'pet-merge')
     await session.commit()
     return await pet_state(player, session)
 
@@ -164,6 +222,7 @@ async def battle_cards(player: Player = Depends(current_player), session: AsyncS
     player.card_materials += 15
     if player.card_chapter < 12:
         player.card_chapter += 1
+    await record_play(player, session, 'card-arena')
     await session.commit()
     return await card_state(player, session)
 
@@ -181,5 +240,6 @@ async def craft_card(card_key: str, player: Player = Depends(current_player), se
         card.level += 1
     else:
         session.add(Card(player_id=player.id, card_key=card_key, level=1))
+    await record_play(player, session, 'card-arena')
     await session.commit()
     return await card_state(player, session)
