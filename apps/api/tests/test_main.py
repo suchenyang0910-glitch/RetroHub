@@ -337,6 +337,10 @@ def test_profile_honors_and_privacy_controls(monkeypatch):
         preference = client.put('/api/profile/data-preferences', headers=headers, json={'personalized_recommendations': False})
         assert preference.json() == {'personalized_recommendations': False}
         assert client.get('/api/profile', headers=headers).json()['personalized_recommendations'] is False
+        notification = client.get('/api/profile/notification-preferences', headers=headers).json()
+        assert notification == {'crop_mature': True, 'idle_full': True, 'daily_checkin': True, 'activities': False, 'seasons': False}
+        notification['activities'] = True
+        assert client.put('/api/profile/notification-preferences', headers=headers, json=notification).json()['activities'] is True
 
 def test_game_reset_is_support_ticket_only(monkeypatch):
     from uuid import uuid4

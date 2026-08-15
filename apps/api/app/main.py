@@ -195,6 +195,15 @@ class DataPreference(Base):
     player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
     personalized_recommendations: Mapped[bool] = mapped_column(default=True)
 
+class NotificationPreference(Base):
+    __tablename__ = 'notification_preferences'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    crop_mature: Mapped[bool] = mapped_column(default=True)
+    idle_full: Mapped[bool] = mapped_column(default=True)
+    daily_checkin: Mapped[bool] = mapped_column(default=True)
+    activities: Mapped[bool] = mapped_column(default=False)
+    seasons: Mapped[bool] = mapped_column(default=False)
+
 class ProfileVisit(Base):
     __tablename__ = 'profile_visits'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -265,6 +274,12 @@ class VisitorPreferenceUpdate(BaseModel): enabled: bool
 class DataPreferenceUpdate(BaseModel): personalized_recommendations: bool
 class ResetRequest(BaseModel): game: str = Field(pattern='^(farm|pets|cards|all)$')
 class TicketStatusUpdate(BaseModel): status: str = Field(pattern='^(open|approved|rejected)$')
+class NotificationPreferenceUpdate(BaseModel):
+    crop_mature: bool
+    idle_full: bool
+    daily_checkin: bool
+    activities: bool
+    seasons: bool
 
 async def db() -> AsyncIterator[AsyncSession]:
     async with Session() as session: yield session
@@ -491,6 +506,14 @@ async def get_or_create_data_preference(player: Player, session: AsyncSession) -
         await session.commit()
     return preference
 
+async def get_or_create_notification_preference(player: Player, session: AsyncSession) -> NotificationPreference:
+    preference = await session.get(NotificationPreference, player.id)
+    if not preference:
+        preference = NotificationPreference(player_id=player.id, crop_mature=True, idle_full=True, daily_checkin=True, activities=False, seasons=False)
+        session.add(preference)
+        await session.commit()
+    return preference
+
 async def profile_state(player: Player, session: AsyncSession) -> dict:
     profile = await get_or_create_profile(player, session)
     identity = await session.get(TelegramIdentity, player.id)
@@ -599,6 +622,22 @@ async def update_data_preference(update: DataPreferenceUpdate, player: Player = 
     preference.personalized_recommendations = update.personalized_recommendations
     await session.commit()
     return {'personalized_recommendations': preference.personalized_recommendations}
+
+@app.get('/api/profile/notification-preferences')
+async def get_notification_preference(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    preference = await get_or_create_notification_preference(player, session)
+    return {'crop_mature': preference.crop_mature, 'idle_full': preference.idle_full, 'daily_checkin': preference.daily_checkin, 'activities': preference.activities, 'seasons': preference.seasons}
+
+@app.put('/api/profile/notification-preferences')
+async def update_notification_preference(update: NotificationPreferenceUpdate, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    preference = await get_or_create_notification_preference(player, session)
+    preference.crop_mature = update.crop_mature
+    preference.idle_full = update.idle_full
+    preference.daily_checkin = update.daily_checkin
+    preference.activities = update.activities
+    preference.seasons = update.seasons
+    await session.commit()
+    return {'crop_mature': preference.crop_mature, 'idle_full': preference.idle_full, 'daily_checkin': preference.daily_checkin, 'activities': preference.activities, 'seasons': preference.seasons}
 
 @app.get('/api/support/tickets/me')
 async def get_my_support_tickets(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
