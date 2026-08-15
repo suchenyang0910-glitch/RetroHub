@@ -9,15 +9,29 @@ type Cards = { materials: number; chapter: number; cards: { key: string; level: 
 type Checkin = { played_today: boolean; claimed_today: boolean; streak: number; can_claim: boolean; collection_awarded?: number };
 type Leaderboard = { entries: { rank: number; name: string; level: number; xp: number; is_me: boolean }[] };
 type Game = 'farm' | 'pets' | 'cards';
+type Locale = 'en' | 'zh' | 'ru';
 const getTelegram = () => (window as any).Telegram?.WebApp;
 const headers = (): Record<string, string> => { const initData = getTelegram()?.initData as string | undefined; return initData ? { 'X-Telegram-Init-Data': initData } : {}; };
-const gameMeta: Record<Game, { label: string; title: string; description: string; tone: string }> = {
-  farm: { label: 'FARM', title: 'Memory Farm', description: 'Plant, harvest and grow your little town.', tone: 'farm' },
-  pets: { label: 'PET', title: 'Pet Merge', description: 'Merge matching pixel pets into new companions.', tone: 'pet' },
-  cards: { label: 'CARD', title: 'Card Arena', description: 'Craft your deck and advance through story chapters.', tone: 'card' },
+const text: Record<Locale, Record<string, string>> = {
+  en: { farm: 'Memory Farm', pets: 'Pet Merge', cards: 'Card Arena', farmDesc: 'Plant, harvest and grow your little town.', petsDesc: 'Merge matching pixel pets into new companions.', cardsDesc: 'Craft your deck and advance through story chapters.', checkin: 'DAILY CHECK-IN', claim: 'Claim', claimed: 'Claimed', core: 'CORE GAMEPLAY', hall: 'Your game hall', allOpen: 'All games open', play: 'Play', playing: 'Playing', inventory: 'Farm inventory', wheat: 'Wheat', deliver: 'Deliver wheat', delivered: 'Delivered', petBoard: 'Pet board', forge: 'Crafting forge', leaderboard: 'Farm leaderboard', ranks: 'Leaderboard', friends: 'Friends', me: 'Me', beta: 'Beta is open', navHall: 'Hall', syncCheckin: 'Syncing daily reward...', unlockCheckin: 'Play any game to unlock today\'s reward.', readyCheckin: 'Play recorded. Claim your memory card.', streak: 'streak complete', plant: 'Plant wheat', harvest: 'Harvest', growing: 'Growing...', chapter: 'Play chapter', craft: 'Craft Clockwork Fox (30)', noCards: 'No cards crafted yet.', noRanks: 'No farm rankings yet.', auth: 'Open this Mini App from Telegram to authenticate.' },
+  zh: { farm: '记忆农场', pets: '宠物合成', cards: '卡牌竞技场', farmDesc: '种植、收获，建设你的怀旧小镇。', petsDesc: '合成同阶像素宠物，发现新伙伴。', cardsDesc: '制作卡牌并推进主线章节。', checkin: '每日签到', claim: '领取', claimed: '已领取', core: '核心玩法', hall: '游戏大厅', allOpen: '三款游戏已开放', play: '开始', playing: '进行中', inventory: '农场库存', wheat: '小麦', deliver: '交付小麦', delivered: '已交付', petBoard: '宠物棋盘', forge: '卡牌工坊', leaderboard: '农场排行榜', ranks: '排行榜', friends: '好友', me: '我的', beta: '测试版已开放', navHall: '大厅', syncCheckin: '正在同步每日奖励…', unlockCheckin: '完成任意游戏操作后可领取今日奖励。', readyCheckin: '已记录游玩，可领取收藏卡。', streak: '天连续签到完成', plant: '种植小麦', harvest: '收获', growing: '生长中…', chapter: '挑战章节', craft: '制作发条狐狸（30）', noCards: '暂未制作卡牌。', noRanks: '暂时没有农场排名。', auth: '请从 Telegram 内打开此 Mini App 完成认证。' },
+  ru: { farm: 'Ферма воспоминаний', pets: 'Слияние питомцев', cards: 'Карточная арена', farmDesc: 'Сажайте, собирайте урожай и развивайте городок.', petsDesc: 'Объединяйте одинаковых пиксельных питомцев.', cardsDesc: 'Создавайте карты и проходите главы.', checkin: 'ЕЖЕДНЕВНЫЙ ВХОД', claim: 'Получить', claimed: 'Получено', core: 'ОСНОВНАЯ ИГРА', hall: 'Игровой зал', allOpen: 'Все игры открыты', play: 'Играть', playing: 'Игра запущена', inventory: 'Склад фермы', wheat: 'Пшеница', deliver: 'Доставить пшеницу', delivered: 'Доставлено', petBoard: 'Поле питомцев', forge: 'Кузница карт', leaderboard: 'Рейтинг фермы', ranks: 'Рейтинг', friends: 'Друзья', me: 'Я', beta: 'Бета открыта', navHall: 'Зал', syncCheckin: 'Загрузка ежедневной награды...', unlockCheckin: 'Сыграйте в любую игру, чтобы получить награду.', readyCheckin: 'Игра учтена. Получите карту воспоминаний.', streak: 'дней подряд', plant: 'Посадить пшеницу', harvest: 'Собрать урожай', growing: 'Растет...', chapter: 'Играть главу', craft: 'Создать Заводную лису (30)', noCards: 'Карты еще не созданы.', noRanks: 'Рейтинга фермы пока нет.', auth: 'Откройте Mini App внутри Telegram для входа.' },
+};
+const resolveLocale = (): Locale => {
+  const saved = window.localStorage.getItem('retrohub.locale');
+  if (saved === 'en' || saved === 'zh' || saved === 'ru') return saved;
+  const language = getTelegram()?.initDataUnsafe?.user?.language_code || navigator.language;
+  return language.startsWith('zh') ? 'zh' : language.startsWith('ru') ? 'ru' : 'en';
 };
 
 function App() {
+  const [locale, setLocale] = React.useState<Locale>(resolveLocale);
+  const t = text[locale];
+  const gameMeta: Record<Game, { label: string; title: string; description: string; tone: string }> = {
+    farm: { label: 'FARM', title: t.farm, description: t.farmDesc, tone: 'farm' },
+    pets: { label: 'PET', title: t.pets, description: t.petsDesc, tone: 'pet' },
+    cards: { label: 'CARD', title: t.cards, description: t.cardsDesc, tone: 'card' },
+  };
   const [game, setGame] = React.useState<Game>('farm');
   const [farm, setFarm] = React.useState<Farm | null>(null);
   const [farmOrders, setFarmOrders] = React.useState<FarmOrders | null>(null);
@@ -27,6 +41,7 @@ function App() {
   const [leaderboard, setLeaderboard] = React.useState<Leaderboard | null>(null);
   const [toast, setToast] = React.useState('');
   const [authError, setAuthError] = React.useState(false);
+  const changeLocale = (next: Locale) => { window.localStorage.setItem('retrohub.locale', next); setLocale(next); };
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200); };
   const request = React.useCallback(async (path: string, method = 'GET') => {
     const response = await fetch(path, { method, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), ...headers() } });
@@ -55,24 +70,24 @@ function App() {
   const petTier = pets?.pets.find((pet) => pet.amount >= 2)?.tier;
   const select = (next: Game) => { setGame(next); setToast('Loading ' + gameMeta[next].title + '...'); };
   const action = game === 'farm'
-    ? { text: farm?.plot.crop ? (farmReady ? 'Harvest' : 'Growing...') : 'Plant wheat', run: () => farm?.plot.crop && !farmReady ? notify('Your wheat is still growing') : void perform(farm?.plot.crop ? '/api/farm/harvest' : '/api/farm/plant', farm?.plot.crop ? 'Harvest complete. +45 coins, +10 XP.' : 'Wheat planted. Return in 20 seconds.') }
+    ? { text: farm?.plot.crop ? (farmReady ? t.harvest : t.growing) : t.plant, run: () => farm?.plot.crop && !farmReady ? notify(t.growing) : void perform(farm?.plot.crop ? '/api/farm/harvest' : '/api/farm/plant', farm?.plot.crop ? 'Harvest complete. +45 coins, +10 XP.' : 'Wheat planted. Return in 20 seconds.') }
     : game === 'pets'
       ? { text: petTier ? `Merge tier ${petTier}` : 'Need two pets', run: () => petTier ? void perform(`/api/pets/merge/${petTier}`, `Tier ${petTier + 1} pet discovered!`) : notify('Earn or merge more pets first') }
-      : { text: 'Play chapter', run: () => void perform('/api/cards/battle', 'Victory! +15 crafting materials.') };
-  const status = authError ? 'Open this Mini App from Telegram to authenticate.' : game === 'farm' ? (farm ? `${farm.coins} coins · ${farm.diamonds} diamonds · ${farm.xp} XP` : 'Syncing farm...')
+      : { text: t.chapter, run: () => void perform('/api/cards/battle', 'Victory! +15 crafting materials.') };
+  const status = authError ? t.auth : game === 'farm' ? (farm ? `${farm.coins} coins · ${farm.diamonds} diamonds · ${farm.xp} XP` : 'Syncing farm...')
     : game === 'pets' ? (pets ? `${pets.pets.reduce((total, pet) => total + pet.amount, 0)} pets in your collection` : 'Syncing collection...')
       : (cards ? `Chapter ${cards.chapter} · ${cards.materials} materials` : 'Syncing card collection...');
-  const checkinMessage = !checkin ? 'Syncing daily reward...' : checkin.claimed_today ? `Day ${checkin.streak} streak complete` : checkin.played_today ? 'Play recorded. Claim your memory card.' : 'Play any game to unlock today\'s reward.';
-  return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>{gameMeta[game].title}</h1></div><button className="avatar" aria-label="Telegram profile">@</button></header>
-    <section className="daily"><div><span>DAILY CHECK-IN</span><strong>{checkinMessage}</strong></div><button disabled={!checkin?.can_claim} onClick={() => void claimCheckin()}>{checkin?.claimed_today ? 'Claimed' : 'Claim'}</button></section>
-    <section className="game-status"><span>CORE GAMEPLAY</span><strong>{status}</strong><button onClick={action.run}>{action.text}</button></section>
-    <section className="section-title"><h2>Your game hall</h2><span>All games open</span></section>
-    <section className="cards">{(Object.keys(gameMeta) as Game[]).map((id) => <article className={`game-card ${gameMeta[id].tone} ${game === id ? 'selected' : ''}`} key={id}><div className="icon">{gameMeta[id].label}</div><div className="copy"><h3>{gameMeta[id].title}</h3><p>{gameMeta[id].description}</p></div><button className={game === id ? 'ghost' : ''} onClick={() => select(id)}>{game === id ? 'Playing' : 'Play'}</button></article>)}</section>
-    {game === 'farm' && farm && farmOrders && <section className="detail-panel"><b>Farm inventory</b><p>Wheat: {farm.inventory.wheat}. {farmOrders.orders[0].title}: deliver {farmOrders.orders[0].required.wheat} wheat for {farmOrders.orders[0].reward.coins} coins.</p><button disabled={farmOrders.orders[0].claimed || farmOrders.orders[0].available.wheat < farmOrders.orders[0].required.wheat} onClick={() => void perform('/api/farm/orders/wheat_delivery/claim', 'Bakery delivery complete!')}>{farmOrders.orders[0].claimed ? 'Delivered' : 'Deliver wheat'}</button></section>}
-    {game === 'pets' && pets && <section className="detail-panel"><b>Pet board</b><p>{pets.pets.map((pet) => `Tier ${pet.tier}: ${pet.amount}`).join(' · ')}</p></section>}
-    {game === 'cards' && cards && <section className="detail-panel"><b>Crafting forge</b><p>{cards.cards.length ? cards.cards.map((card) => `${card.key.replace('_', ' ')} Lv.${card.level}`).join(' · ') : 'No cards crafted yet.'}</p><button onClick={() => void perform('/api/cards/craft/clockwork_fox', 'Clockwork Fox forged!')}>Craft Clockwork Fox (30)</button></section>}
-    {leaderboard && <section className="detail-panel"><b>Farm leaderboard</b><p>{leaderboard.entries.length ? leaderboard.entries.slice(0, 5).map((entry) => `#${entry.rank} ${entry.name} Lv.${entry.level}${entry.is_me ? ' (You)' : ''}`).join(' · ') : 'No farm rankings yet.'}</p></section>}
-    <section className="status"><div><span className="pulse" /> Beta is open</div><button onClick={() => void loadLeaderboard()}>Leaderboard</button></section>
-    <nav><button className="active">Hall</button><button>Friends</button><button>Ranks</button><button>Me</button></nav>{toast && <div role="status" className="toast">{toast}</div>}</main>;
+  const checkinMessage = !checkin ? t.syncCheckin : checkin.claimed_today ? `${checkin.streak} ${t.streak}` : checkin.played_today ? t.readyCheckin : t.unlockCheckin;
+  return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>{gameMeta[game].title}</h1></div><button className="avatar" aria-label="Telegram profile" onClick={() => changeLocale(locale === 'en' ? 'zh' : locale === 'zh' ? 'ru' : 'en')}>{locale.toUpperCase()}</button></header>
+    <section className="daily"><div><span>{t.checkin}</span><strong>{checkinMessage}</strong></div><button disabled={!checkin?.can_claim} onClick={() => void claimCheckin()}>{checkin?.claimed_today ? t.claimed : t.claim}</button></section>
+    <section className="game-status"><span>{t.core}</span><strong>{status}</strong><button onClick={action.run}>{action.text}</button></section>
+    <section className="section-title"><h2>{t.hall}</h2><span>{t.allOpen}</span></section>
+    <section className="cards">{(Object.keys(gameMeta) as Game[]).map((id) => <article className={`game-card ${gameMeta[id].tone} ${game === id ? 'selected' : ''}`} key={id}><div className="icon">{gameMeta[id].label}</div><div className="copy"><h3>{gameMeta[id].title}</h3><p>{gameMeta[id].description}</p></div><button className={game === id ? 'ghost' : ''} onClick={() => select(id)}>{game === id ? t.playing : t.play}</button></article>)}</section>
+    {game === 'farm' && farm && farmOrders && <section className="detail-panel"><b>{t.inventory}</b><p>{t.wheat}: {farm.inventory.wheat}. {farmOrders.orders[0].title}: {farmOrders.orders[0].required.wheat} {t.wheat} / {farmOrders.orders[0].reward.coins} coins.</p><button disabled={farmOrders.orders[0].claimed || farmOrders.orders[0].available.wheat < farmOrders.orders[0].required.wheat} onClick={() => void perform('/api/farm/orders/wheat_delivery/claim', 'Bakery delivery complete!')}>{farmOrders.orders[0].claimed ? t.delivered : t.deliver}</button></section>}
+    {game === 'pets' && pets && <section className="detail-panel"><b>{t.petBoard}</b><p>{pets.pets.map((pet) => `Tier ${pet.tier}: ${pet.amount}`).join(' · ')}</p></section>}
+    {game === 'cards' && cards && <section className="detail-panel"><b>{t.forge}</b><p>{cards.cards.length ? cards.cards.map((card) => `${card.key.replace('_', ' ')} Lv.${card.level}`).join(' · ') : t.noCards}</p><button onClick={() => void perform('/api/cards/craft/clockwork_fox', 'Clockwork Fox forged!')}>{t.craft}</button></section>}
+    {leaderboard && <section className="detail-panel"><b>{t.leaderboard}</b><p>{leaderboard.entries.length ? leaderboard.entries.slice(0, 5).map((entry) => `#${entry.rank} ${entry.name} Lv.${entry.level}${entry.is_me ? ' (You)' : ''}`).join(' · ') : t.noRanks}</p></section>}
+    <section className="status"><div><span className="pulse" /> {t.beta}</div><button onClick={() => void loadLeaderboard()}>{t.ranks}</button></section>
+    <nav><button className="active">{t.navHall}</button><button>{t.friends}</button><button>{t.ranks}</button><button>{t.me}</button></nav>{toast && <div role="status" className="toast">{toast}</div>}</main>;
 }
 createRoot(document.getElementById('root')!).render(<App />);
