@@ -57,6 +57,7 @@ function App() {
   const [notificationPreferences, setNotificationPreferences] = React.useState<NotificationPreferences | null>(null);
   const [toast, setToast] = React.useState('');
   const [authError, setAuthError] = React.useState(false);
+  const hasAuthenticated = React.useRef(false);
   const changeLocale = (next: Locale) => { window.localStorage.setItem('retrohub.locale', next); setLocale(next); };
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200); };
   const request = React.useCallback(async (path: string, method = 'GET') => {
@@ -72,6 +73,7 @@ function App() {
   const refresh = React.useCallback(async () => {
     const profileState = await request('/api/profile');
     setProfile(profileState);
+    hasAuthenticated.current = true;
     if (!profileState.age_confirmed) return;
     setCheckin(await request('/api/checkin'));
     setOnboarding(await request('/api/onboarding'));
@@ -91,7 +93,7 @@ function App() {
         // A slow refresh or a temporary API error must not masquerade as a Telegram login error.
         // Only the API's explicit authentication responses show the Telegram launch guidance.
         const status = (error as Error & { status?: number }).status;
-        if (active && (status === 401 || status === 403)) setAuthError(true);
+        if (active && !hasAuthenticated.current && (status === 401 || status === 403)) setAuthError(true);
       }
     };
     void load();
