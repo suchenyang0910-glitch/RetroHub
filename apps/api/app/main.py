@@ -128,6 +128,12 @@ class FarmHelp(Base):
     help_type: Mapped[str] = mapped_column(String(20))
     helped_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(timezone.utc).date())
 
+class FarmSocialState(Base):
+    __tablename__ = 'farm_social_states'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    friendship_energy: Mapped[int] = mapped_column(Integer, default=10)
+    refreshed_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(timezone.utc).date())
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all)
@@ -271,6 +277,23 @@ async def friend_target(friend_telegram_id: str, player: Player, session: AsyncS
         raise HTTPException(422, 'You cannot add yourself as a friend')
     return friend
 
+def friendship_energy_cap(player: Player) -> int:
+    return 10 + max(0, player.farm_level - 1) * 2
+
+async def social_state(player: Player, session: AsyncSession) -> FarmSocialState:
+    state = await session.get(FarmSocialState, player.id)
+    today = datetime.now(timezone.utc).date()
+    cap = friendship_energy_cap(player)
+    if not state:
+        state = FarmSocialState(player_id=player.id, friendship_energy=cap, refreshed_on=today)
+        session.add(state)
+        await session.commit()
+    elif state.refreshed_on != today:
+        state.friendship_energy = cap
+        state.refreshed_on = today
+        await session.commit()
+    return state
+
 @app.get('/health', response_model=Health)
 async def health() -> Health: return Health(status='ok', service='retrohub-api', timestamp=datetime.now(timezone.utc))
 
@@ -337,7 +360,13 @@ async def get_friends(player: Player = Depends(current_player), session: AsyncSe
         profile = await get_or_create_profile(friend, session)
         identity = await session.get(TelegramIdentity, friend.id)
         result.append({'telegram_id': friend.telegram_id, 'name': friend.display_name, 'avatar_url': identity.avatar_url if identity else None, 'farm_public': profile.farm_public})
-    return {'friends': result}
+    energy = await social_state(player, session)
+    return {'friends': result, 'friendship_energy': energy.friendship_energy, 'friendship_energy_cap': friendship_energy_cap(player)}
+
+@app.get('/api/friends/energy')
+async def get_friendship_energy(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    energy = await social_state(player, session)
+    return {'friendship_energy': energy.friendship_energy, 'friendship_energy_cap': friendship_energy_cap(player)}
 
 @app.get('/api/friends/{friend_telegram_id}/farm')
 async def visit_friend_farm(friend_telegram_id: str, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
@@ -366,6 +395,9 @@ async def water_friend_farm(friend_telegram_id: str, player: Player = Depends(cu
     helped = await session.scalar(select(FarmHelp).where(FarmHelp.helper_id == player.id, FarmHelp.target_id == friend.id, FarmHelp.help_type == 'water', FarmHelp.helped_on == today))
     if helped:
         raise HTTPException(409, 'You already watered this friend today')
+    energy = await social_state(player, session)
+    if energy.friendship_energy < 1:
+        raise HTTPException(409, 'Friendship energy is empty; it refreshes tomorrow')
     now = datetime.now(timezone.utc)
     ready_at = friend.wheat_ready_at
     if ready_at and ready_at.tzinfo is None:
@@ -376,8 +408,9 @@ async def water_friend_farm(friend_telegram_id: str, player: Player = Depends(cu
         friend.wheat_ready_at = max(boosted, now)
         seconds_saved = 5
     session.add(FarmHelp(helper_id=player.id, target_id=friend.id, help_type='water', helped_on=today))
+    energy.friendship_energy -= 1
     await session.commit()
-    return {'owner': friend.display_name, 'help': 'water', 'seconds_saved': seconds_saved, 'relationship_progress': 1}
+    return {'owner': friend.display_name, 'help': 'water', 'seconds_saved': seconds_saved, 'relationship_progress': 1, 'friendship_energy': energy.friendship_energy, 'friendship_energy_cap': friendship_energy_cap(player)}
 
 @app.post('/api/checkin/claim')
 async def claim_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:

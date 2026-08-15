@@ -201,4 +201,6 @@ def test_friends_can_visit_and_water_public_farms(monkeypatch):
         watered = client.post(f'/api/friends/{owner_id}/help/water', headers=helper_headers)
         assert watered.status_code == 200
         assert watered.json()['relationship_progress'] == 1
+        assert watered.json()['friendship_energy'] == 9
+        assert watered.json()['friendship_energy_cap'] == 10
         assert client.post(f'/api/friends/{owner_id}/help/water', headers=helper_headers).status_code == 409
