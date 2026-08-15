@@ -135,7 +135,7 @@ def test_farm_harvest_then_sell_writes_server_ledger(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient
     from sqlalchemy import select
-    from app.main import Player, Session, app
+    from app.main import FarmPlot, Player, Session, app
     monkeypatch.setenv('DEBUG', 'true')
     user_id = f'test-sell-{uuid4()}'
     headers = {'X-Telegram-User': user_id}
@@ -145,7 +145,8 @@ def test_farm_harvest_then_sell_writes_server_ledger(monkeypatch):
         async def finish_crop() -> None:
             async with Session() as session:
                 player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
-                player.wheat_ready_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                plot = await session.get(FarmPlot, player.id)
+                plot.ready_at = datetime.now(timezone.utc) - timedelta(seconds=1)
                 await session.commit()
 
         asyncio.run(finish_crop())
@@ -157,6 +158,31 @@ def test_farm_harvest_then_sell_writes_server_ledger(monkeypatch):
         assert sold.json()['inventory']['wheat'] == 0
         assert sold.json()['coins'] == 1025
         assert sold.json()['ledger'][0] == {'type': 'sell_wheat', 'coins_delta': 45, 'xp_delta': 0}
+
+def test_farm_crop_unlocks_and_inventory_are_server_controlled(monkeypatch):
+    import asyncio
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.main import Player, Session, app
+    monkeypatch.setenv('DEBUG', 'true')
+    user_id = f'test-crops-{uuid4()}'
+    headers = {'X-Telegram-User': user_id}
+    with TestClient(app) as client:
+        assert client.post('/api/farm/plant', headers=headers, json={'crop': 'carrot'}).status_code == 409
+
+        async def unlock_carrot() -> None:
+            async with Session() as session:
+                player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
+                player.farm_level = 2
+                await session.commit()
+
+        asyncio.run(unlock_carrot())
+        planted = client.post('/api/farm/plant', headers=headers, json={'crop': 'carrot'})
+        assert planted.status_code == 200
+        assert planted.json()['plot']['crop'] == 'carrot'
+        assert planted.json()['crops'][1]['unlocked'] is True
+        assert client.post('/api/farm/sell/carrot', headers=headers).status_code == 409
 
 def test_profile_honors_and_privacy_controls(monkeypatch):
     from uuid import uuid4
