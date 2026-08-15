@@ -2,7 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
-type Farm = { level: number; xp: number; coins: number; diamonds: number; inventory: { wheat: number }; plot: { crop: string | null; ready: boolean } };
+type Farm = { level: number; xp: number; coins: number; diamonds: number; inventory: { wheat: number }; plot: { crop: string | null; ready: boolean }; ledger: { type: string; coins_delta: number; xp_delta: number }[] };
 type FarmOrders = { orders: { key: string; title: string; required: { wheat: number }; available: { wheat: number }; reward: { coins: number; xp: number }; claimed: boolean }[] };
 type Pets = { pets: { tier: number; amount: number }[] };
 type Cards = { materials: number; chapter: number; cards: { key: string; level: number }[] };
@@ -88,7 +88,7 @@ function App() {
   const petTier = pets?.pets.find((pet) => pet.amount >= 2)?.tier;
   const select = (next: Game) => { setGame(next); setToast('Loading ' + gameMeta[next].title + '...'); };
   const action = game === 'farm'
-    ? { text: farm?.plot.crop ? (farmReady ? t.harvest : t.growing) : t.plant, run: () => farm?.plot.crop && !farmReady ? notify(t.growing) : void perform(farm?.plot.crop ? '/api/farm/harvest' : '/api/farm/plant', farm?.plot.crop ? 'Harvest complete. +45 coins, +10 XP.' : 'Wheat planted. Return in 20 seconds.') }
+    ? { text: farm?.plot.crop ? (farmReady ? t.harvest : t.growing) : t.plant, run: () => farm?.plot.crop && !farmReady ? notify(t.growing) : void perform(farm?.plot.crop ? '/api/farm/harvest' : '/api/farm/plant', farm?.plot.crop ? 'Harvest complete. Sell wheat or deliver an order.' : 'Wheat planted. Return in 20 seconds.') }
     : game === 'pets'
       ? { text: petTier ? `Merge tier ${petTier}` : 'Need two pets', run: () => petTier ? void perform(`/api/pets/merge/${petTier}`, `Tier ${petTier + 1} pet discovered!`) : notify('Earn or merge more pets first') }
       : { text: t.chapter, run: () => void perform('/api/cards/battle', 'Victory! +15 crafting materials.') };
@@ -101,7 +101,7 @@ function App() {
     <section className="game-status"><span>{t.core}</span><strong>{status}</strong><button onClick={action.run}>{action.text}</button></section>
     <section className="section-title"><h2>{t.hall}</h2><span>{t.allOpen}</span></section>
     <section className="cards">{(Object.keys(gameMeta) as Game[]).map((id) => <article className={`game-card ${gameMeta[id].tone} ${game === id ? 'selected' : ''}`} key={id}><div className="icon">{gameMeta[id].label}</div><div className="copy"><h3>{gameMeta[id].title}</h3><p>{gameMeta[id].description}</p></div><button className={game === id ? 'ghost' : ''} onClick={() => select(id)}>{game === id ? t.playing : t.play}</button></article>)}</section>
-    {game === 'farm' && farm && farmOrders && <section className="detail-panel"><b>{t.inventory}</b><p>{t.wheat}: {farm.inventory.wheat}. {farmOrders.orders[0].title}: {farmOrders.orders[0].required.wheat} {t.wheat} / {farmOrders.orders[0].reward.coins} coins.</p><button disabled={farmOrders.orders[0].claimed || farmOrders.orders[0].available.wheat < farmOrders.orders[0].required.wheat} onClick={() => void perform('/api/farm/orders/wheat_delivery/claim', 'Bakery delivery complete!')}>{farmOrders.orders[0].claimed ? t.delivered : t.deliver}</button></section>}
+    {game === 'farm' && farm && farmOrders && <section className="detail-panel"><b>{t.inventory}</b><p>{t.wheat}: {farm.inventory.wheat}. Sell one wheat for 45 coins, or {farmOrders.orders[0].title}: {farmOrders.orders[0].required.wheat} {t.wheat} / {farmOrders.orders[0].reward.coins} coins.</p><button disabled={farm.inventory.wheat < 1} onClick={() => void perform('/api/farm/sell/wheat', 'Wheat sold. +45 coins.')}>Sell wheat</button><button disabled={farmOrders.orders[0].claimed || farmOrders.orders[0].available.wheat < farmOrders.orders[0].required.wheat} onClick={() => void perform('/api/farm/orders/wheat_delivery/claim', 'Bakery delivery complete!')}>{farmOrders.orders[0].claimed ? t.delivered : t.deliver}</button>{farm.ledger.length > 0 && <p>Latest: {farm.ledger[0].type.split('_').join(' ')} ({farm.ledger[0].coins_delta >= 0 ? '+' : ''}{farm.ledger[0].coins_delta} coins)</p>}</section>}
     {game === 'pets' && pets && <section className="detail-panel"><b>{t.petBoard}</b><p>{pets.pets.map((pet) => `Tier ${pet.tier}: ${pet.amount}`).join(' · ')}</p></section>}
     {game === 'cards' && cards && <section className="detail-panel"><b>{t.forge}</b><p>{cards.cards.length ? cards.cards.map((card) => `${card.key.replace('_', ' ')} Lv.${card.level}`).join(' · ') : t.noCards}</p><button onClick={() => void perform('/api/cards/craft/clockwork_fox', 'Clockwork Fox forged!')}>{t.craft}</button></section>}
     {leaderboard && <section className="detail-panel"><b>{t.leaderboard}</b><p>{leaderboard.entries.length ? leaderboard.entries.slice(0, 5).map((entry) => `#${entry.rank} ${entry.name} Lv.${entry.level}${entry.is_me ? ' (You)' : ''}`).join(' · ') : t.noRanks}</p></section>}

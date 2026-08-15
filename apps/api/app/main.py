@@ -79,6 +79,15 @@ class FarmOrder(Base):
     order_key: Mapped[str] = mapped_column(String(40))
     claimed: Mapped[bool] = mapped_column(default=False)
 
+class FarmLedger(Base):
+    __tablename__ = 'farm_ledger'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    entry_type: Mapped[str] = mapped_column(String(40), index=True)
+    coins_delta: Mapped[int] = mapped_column(Integer, default=0)
+    xp_delta: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class PlayerProfile(Base):
     __tablename__ = 'player_profiles'
     player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
@@ -146,7 +155,11 @@ async def farm_state(p: Player, session: AsyncSession) -> dict:
         ready_at = ready_at.replace(tzinfo=timezone.utc)
     ready = bool(ready_at and ready_at <= now)
     wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == p.id, FarmStock.item_key == 'wheat'))
-    return {'level':p.farm_level,'xp':p.farm_xp,'coins':p.farm_coins,'diamonds':p.farm_diamonds,'inventory': {'wheat': wheat.amount if wheat else 0}, 'plot':{'crop':'wheat' if ready_at else None,'ready_at':ready_at,'ready':ready}}
+    recent = list((await session.scalars(select(FarmLedger).where(FarmLedger.player_id == p.id).order_by(FarmLedger.id.desc()).limit(5))).all())
+    return {'level':p.farm_level,'xp':p.farm_xp,'coins':p.farm_coins,'diamonds':p.farm_diamonds,'inventory': {'wheat': wheat.amount if wheat else 0}, 'plot':{'crop':'wheat' if ready_at else None,'ready_at':ready_at,'ready':ready}, 'ledger': [{'type': entry.entry_type, 'coins_delta': entry.coins_delta, 'xp_delta': entry.xp_delta} for entry in recent]}
+
+def record_farm_ledger(session: AsyncSession, player: Player, entry_type: str, coins_delta: int = 0, xp_delta: int = 0) -> None:
+    session.add(FarmLedger(player_id=player.id, entry_type=entry_type, coins_delta=coins_delta, xp_delta=xp_delta))
 
 async def farm_orders_state(player: Player, session: AsyncSession) -> dict:
     order = await session.scalar(select(FarmOrder).where(FarmOrder.player_id == player.id, FarmOrder.order_key == 'wheat_delivery'))
@@ -333,6 +346,7 @@ async def plant(_: FarmAction, player: Player = Depends(current_player), session
     if player.farm_coins < 20: raise HTTPException(409, 'Not enough coins')
     from datetime import timedelta
     player.farm_coins -= 20; player.wheat_ready_at = now + timedelta(seconds=20)
+    record_farm_ledger(session, player, 'plant_wheat', coins_delta=-20)
     await record_play(player, session, 'farm')
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
 
@@ -343,15 +357,28 @@ async def harvest(player: Player = Depends(current_player), session: AsyncSessio
     if ready_at and ready_at.tzinfo is None:
         ready_at = ready_at.replace(tzinfo=timezone.utc)
     if not ready_at or ready_at > now: raise HTTPException(409, 'Crop is not ready')
-    player.wheat_ready_at = None; player.farm_coins += 45; player.farm_xp += 10
+    player.wheat_ready_at = None; player.farm_xp += 10
     wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
     if not wheat:
         wheat = FarmStock(player_id=player.id, item_key='wheat', amount=0)
         session.add(wheat)
     wheat.amount += 1
+    record_farm_ledger(session, player, 'harvest_wheat', xp_delta=10)
     await record_play(player, session, 'farm')
     if player.farm_xp >= player.farm_level * 30: player.farm_level += 1; player.farm_xp = 0
     await session.commit(); await session.refresh(player); return await farm_state(player, session)
+
+@app.post('/api/farm/sell/wheat')
+async def sell_wheat(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
+    if not wheat or wheat.amount < 1:
+        raise HTTPException(409, 'Harvest wheat before selling it')
+    wheat.amount -= 1
+    player.farm_coins += 45
+    record_farm_ledger(session, player, 'sell_wheat', coins_delta=45)
+    await record_play(player, session, 'farm')
+    await session.commit()
+    return await farm_state(player, session)
 
 @app.post('/api/farm/orders/wheat_delivery/claim')
 async def claim_wheat_delivery(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
@@ -366,6 +393,7 @@ async def claim_wheat_delivery(player: Player = Depends(current_player), session
     order.claimed = True
     player.farm_coins += 120
     player.farm_xp += 40
+    record_farm_ledger(session, player, 'order_wheat_delivery', coins_delta=120, xp_delta=40)
     await record_play(player, session, 'farm')
     await session.commit()
     return {**await farm_state(player, session), **await farm_orders_state(player, session)}

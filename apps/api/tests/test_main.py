@@ -107,6 +107,35 @@ def test_farm_order_consumes_inventory_and_rewards_player(monkeypatch):
         assert claimed.json()['orders'][0]['claimed'] is True
         assert claimed.json()['coins'] == 1120
 
+def test_farm_harvest_then_sell_writes_server_ledger(monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.main import Player, Session, app
+    monkeypatch.setenv('DEBUG', 'true')
+    user_id = f'test-sell-{uuid4()}'
+    headers = {'X-Telegram-User': user_id}
+    with TestClient(app) as client:
+        assert client.post('/api/farm/plant', headers=headers, json={'crop': 'wheat'}).status_code == 200
+
+        async def finish_crop() -> None:
+            async with Session() as session:
+                player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
+                player.wheat_ready_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                await session.commit()
+
+        asyncio.run(finish_crop())
+        harvested = client.post('/api/farm/harvest', headers=headers)
+        assert harvested.status_code == 200
+        assert harvested.json()['inventory']['wheat'] == 1
+        sold = client.post('/api/farm/sell/wheat', headers=headers)
+        assert sold.status_code == 200
+        assert sold.json()['inventory']['wheat'] == 0
+        assert sold.json()['coins'] == 1025
+        assert sold.json()['ledger'][0] == {'type': 'sell_wheat', 'coins_delta': 45, 'xp_delta': 0}
+
 def test_profile_honors_and_privacy_controls(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient
