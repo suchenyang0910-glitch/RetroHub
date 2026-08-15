@@ -79,3 +79,30 @@ def test_daily_checkin_requires_play_and_leaderboard(monkeypatch):
         leaderboard = client.get('/api/leaderboards/farm', headers=headers)
         assert leaderboard.status_code == 200
         assert any(entry['is_me'] for entry in leaderboard.json()['entries'])
+
+def test_farm_order_consumes_inventory_and_rewards_player(monkeypatch):
+    import asyncio
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.main import FarmStock, Player, Session, app
+    monkeypatch.setenv('DEBUG', 'true')
+    user_id = f'test-order-{uuid4()}'
+    headers = {'X-Telegram-User': user_id}
+    with TestClient(app) as client:
+        order = client.get('/api/farm/orders', headers=headers)
+        assert order.status_code == 200
+        assert client.post('/api/farm/orders/wheat_delivery/claim', headers=headers).status_code == 409
+
+        async def add_wheat() -> None:
+            async with Session() as session:
+                player = await session.scalar(select(Player).where(Player.telegram_id == user_id))
+                session.add(FarmStock(player_id=player.id, item_key='wheat', amount=2))
+                await session.commit()
+
+        asyncio.run(add_wheat())
+        claimed = client.post('/api/farm/orders/wheat_delivery/claim', headers=headers)
+        assert claimed.status_code == 200
+        assert claimed.json()['inventory']['wheat'] == 0
+        assert claimed.json()['orders'][0]['claimed'] is True
+        assert claimed.json()['coins'] == 1120

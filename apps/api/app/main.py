@@ -63,6 +63,22 @@ class DailyCheckin(Base):
     claimed_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(timezone.utc).date())
     collection_awarded: Mapped[int] = mapped_column(Integer, default=1)
 
+class FarmStock(Base):
+    __tablename__ = 'farm_stock'
+    __table_args__ = (UniqueConstraint('player_id', 'item_key', name='uq_farm_stock_item'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    item_key: Mapped[str] = mapped_column(String(40))
+    amount: Mapped[int] = mapped_column(Integer, default=0)
+
+class FarmOrder(Base):
+    __tablename__ = 'farm_orders'
+    __table_args__ = (UniqueConstraint('player_id', 'order_key', name='uq_farm_order'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), index=True)
+    order_key: Mapped[str] = mapped_column(String(40))
+    claimed: Mapped[bool] = mapped_column(default=False)
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all)
@@ -98,7 +114,7 @@ async def current_player(
         session.add(player); await session.commit(); await session.refresh(player)
     return player
 
-def farm_state(p: Player) -> dict:
+async def farm_state(p: Player, session: AsyncSession) -> dict:
     now = datetime.now(timezone.utc)
     ready_at = p.wheat_ready_at
     # SQLite does not round-trip timezone data, while PostgreSQL does. Normalize
@@ -106,7 +122,17 @@ def farm_state(p: Player) -> dict:
     if ready_at and ready_at.tzinfo is None:
         ready_at = ready_at.replace(tzinfo=timezone.utc)
     ready = bool(ready_at and ready_at <= now)
-    return {'level':p.farm_level,'xp':p.farm_xp,'coins':p.farm_coins,'diamonds':p.farm_diamonds,'plot':{'crop':'wheat' if ready_at else None,'ready_at':ready_at,'ready':ready}}
+    wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == p.id, FarmStock.item_key == 'wheat'))
+    return {'level':p.farm_level,'xp':p.farm_xp,'coins':p.farm_coins,'diamonds':p.farm_diamonds,'inventory': {'wheat': wheat.amount if wheat else 0}, 'plot':{'crop':'wheat' if ready_at else None,'ready_at':ready_at,'ready':ready}}
+
+async def farm_orders_state(player: Player, session: AsyncSession) -> dict:
+    order = await session.scalar(select(FarmOrder).where(FarmOrder.player_id == player.id, FarmOrder.order_key == 'wheat_delivery'))
+    if not order:
+        order = FarmOrder(player_id=player.id, order_key='wheat_delivery')
+        session.add(order)
+        await session.commit()
+    wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
+    return {'orders': [{'key': 'wheat_delivery', 'title': 'Town Bakery Delivery', 'required': {'wheat': 2}, 'available': {'wheat': wheat.amount if wheat else 0}, 'reward': {'coins': 120, 'xp': 40}, 'claimed': order.claimed}]}
 
 async def pet_state(player: Player, session: AsyncSession) -> dict:
     stacks = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id).order_by(PetStack.tier))).all())
@@ -167,7 +193,12 @@ async def farm_leaderboard(player: Player = Depends(current_player), session: As
     return {'period': 'all_time', 'metric': 'farm_level', 'entries': entries}
 
 @app.get('/api/farm')
-async def get_farm(player: Player = Depends(current_player)) -> dict: return farm_state(player)
+async def get_farm(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    return await farm_state(player, session)
+
+@app.get('/api/farm/orders')
+async def get_farm_orders(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    return await farm_orders_state(player, session)
 
 @app.post('/api/farm/plant')
 async def plant(_: FarmAction, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
@@ -177,7 +208,7 @@ async def plant(_: FarmAction, player: Player = Depends(current_player), session
     from datetime import timedelta
     player.farm_coins -= 20; player.wheat_ready_at = now + timedelta(seconds=20)
     await record_play(player, session, 'farm')
-    await session.commit(); await session.refresh(player); return farm_state(player)
+    await session.commit(); await session.refresh(player); return await farm_state(player, session)
 
 @app.post('/api/farm/harvest')
 async def harvest(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
@@ -187,9 +218,31 @@ async def harvest(player: Player = Depends(current_player), session: AsyncSessio
         ready_at = ready_at.replace(tzinfo=timezone.utc)
     if not ready_at or ready_at > now: raise HTTPException(409, 'Crop is not ready')
     player.wheat_ready_at = None; player.farm_coins += 45; player.farm_xp += 10
+    wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
+    if not wheat:
+        wheat = FarmStock(player_id=player.id, item_key='wheat', amount=0)
+        session.add(wheat)
+    wheat.amount += 1
     await record_play(player, session, 'farm')
     if player.farm_xp >= player.farm_level * 30: player.farm_level += 1; player.farm_xp = 0
-    await session.commit(); await session.refresh(player); return farm_state(player)
+    await session.commit(); await session.refresh(player); return await farm_state(player, session)
+
+@app.post('/api/farm/orders/wheat_delivery/claim')
+async def claim_wheat_delivery(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    await farm_orders_state(player, session)
+    order = await session.scalar(select(FarmOrder).where(FarmOrder.player_id == player.id, FarmOrder.order_key == 'wheat_delivery'))
+    wheat = await session.scalar(select(FarmStock).where(FarmStock.player_id == player.id, FarmStock.item_key == 'wheat'))
+    if order.claimed:
+        raise HTTPException(409, 'This order is already complete')
+    if not wheat or wheat.amount < 2:
+        raise HTTPException(409, 'Two wheat are required for this order')
+    wheat.amount -= 2
+    order.claimed = True
+    player.farm_coins += 120
+    player.farm_xp += 40
+    await record_play(player, session, 'farm')
+    await session.commit()
+    return {**await farm_state(player, session), **await farm_orders_state(player, session)}
 
 @app.get('/api/pets')
 async def get_pets(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:

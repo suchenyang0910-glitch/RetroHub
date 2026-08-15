@@ -2,7 +2,8 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
-type Farm = { level: number; xp: number; coins: number; diamonds: number; plot: { crop: string | null; ready: boolean } };
+type Farm = { level: number; xp: number; coins: number; diamonds: number; inventory: { wheat: number }; plot: { crop: string | null; ready: boolean } };
+type FarmOrders = { orders: { key: string; title: string; required: { wheat: number }; available: { wheat: number }; reward: { coins: number; xp: number }; claimed: boolean }[] };
 type Pets = { pets: { tier: number; amount: number }[] };
 type Cards = { materials: number; chapter: number; cards: { key: string; level: number }[] };
 type Checkin = { played_today: boolean; claimed_today: boolean; streak: number; can_claim: boolean; collection_awarded?: number };
@@ -19,6 +20,7 @@ const gameMeta: Record<Game, { label: string; title: string; description: string
 function App() {
   const [game, setGame] = React.useState<Game>('farm');
   const [farm, setFarm] = React.useState<Farm | null>(null);
+  const [farmOrders, setFarmOrders] = React.useState<FarmOrders | null>(null);
   const [pets, setPets] = React.useState<Pets | null>(null);
   const [cards, setCards] = React.useState<Cards | null>(null);
   const [checkin, setCheckin] = React.useState<Checkin | null>(null);
@@ -33,7 +35,7 @@ function App() {
   }, []);
   const refresh = React.useCallback(async () => {
     setCheckin(await request('/api/checkin'));
-    if (game === 'farm') setFarm(await request('/api/farm'));
+    if (game === 'farm') { setFarm(await request('/api/farm')); setFarmOrders(await request('/api/farm/orders')); }
     if (game === 'pets') setPets(await request('/api/pets'));
     if (game === 'cards') setCards(await request('/api/cards'));
   }, [game, request]);
@@ -46,7 +48,7 @@ function App() {
     const timer = window.setInterval(() => { void load(); }, 15_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [refresh]);
-  const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') setFarm(data); if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); setCheckin(await request('/api/checkin')); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
+  const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') { setFarm(data); setFarmOrders(await request('/api/farm/orders')); } if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); setCheckin(await request('/api/checkin')); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
   const claimCheckin = async () => { try { const data = await request('/api/checkin/claim', 'POST'); setCheckin(data); notify(`Check-in complete. +${data.collection_awarded} memory card${data.collection_awarded > 1 ? 's' : ''}.`); } catch (error) { notify(error instanceof Error ? error.message : 'Check-in unavailable'); } };
   const loadLeaderboard = async () => { try { setLeaderboard(await request('/api/leaderboards/farm')); } catch (error) { notify(error instanceof Error ? error.message : 'Leaderboard unavailable'); } };
   const farmReady = farm?.plot.crop && farm.plot.ready;
@@ -66,6 +68,7 @@ function App() {
     <section className="game-status"><span>CORE GAMEPLAY</span><strong>{status}</strong><button onClick={action.run}>{action.text}</button></section>
     <section className="section-title"><h2>Your game hall</h2><span>All games open</span></section>
     <section className="cards">{(Object.keys(gameMeta) as Game[]).map((id) => <article className={`game-card ${gameMeta[id].tone} ${game === id ? 'selected' : ''}`} key={id}><div className="icon">{gameMeta[id].label}</div><div className="copy"><h3>{gameMeta[id].title}</h3><p>{gameMeta[id].description}</p></div><button className={game === id ? 'ghost' : ''} onClick={() => select(id)}>{game === id ? 'Playing' : 'Play'}</button></article>)}</section>
+    {game === 'farm' && farm && farmOrders && <section className="detail-panel"><b>Farm inventory</b><p>Wheat: {farm.inventory.wheat}. {farmOrders.orders[0].title}: deliver {farmOrders.orders[0].required.wheat} wheat for {farmOrders.orders[0].reward.coins} coins.</p><button disabled={farmOrders.orders[0].claimed || farmOrders.orders[0].available.wheat < farmOrders.orders[0].required.wheat} onClick={() => void perform('/api/farm/orders/wheat_delivery/claim', 'Bakery delivery complete!')}>{farmOrders.orders[0].claimed ? 'Delivered' : 'Deliver wheat'}</button></section>}
     {game === 'pets' && pets && <section className="detail-panel"><b>Pet board</b><p>{pets.pets.map((pet) => `Tier ${pet.tier}: ${pet.amount}`).join(' · ')}</p></section>}
     {game === 'cards' && cards && <section className="detail-panel"><b>Crafting forge</b><p>{cards.cards.length ? cards.cards.map((card) => `${card.key.replace('_', ' ')} Lv.${card.level}`).join(' · ') : 'No cards crafted yet.'}</p><button onClick={() => void perform('/api/cards/craft/clockwork_fox', 'Clockwork Fox forged!')}>Craft Clockwork Fox (30)</button></section>}
     {leaderboard && <section className="detail-panel"><b>Farm leaderboard</b><p>{leaderboard.entries.length ? leaderboard.entries.slice(0, 5).map((entry) => `#${entry.rank} ${entry.name} Lv.${entry.level}${entry.is_me ? ' (You)' : ''}`).join(' · ') : 'No farm rankings yet.'}</p></section>}
