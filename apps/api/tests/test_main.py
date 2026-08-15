@@ -325,6 +325,10 @@ def test_profile_honors_and_privacy_controls(monkeypatch):
         updated = client.put('/api/profile/privacy', headers=headers, json={'farm_public': True, 'collection_public': True})
         assert updated.status_code == 200
         assert updated.json()['privacy'] == {'farm_public': True, 'collection_public': True}
+        assert profile.json()['personalized_recommendations'] is True
+        preference = client.put('/api/profile/data-preferences', headers=headers, json={'personalized_recommendations': False})
+        assert preference.json() == {'personalized_recommendations': False}
+        assert client.get('/api/profile', headers=headers).json()['personalized_recommendations'] is False
 
 def test_friends_can_visit_and_water_public_farms(monkeypatch):
     from uuid import uuid4

@@ -155,6 +155,11 @@ class VisitorPreference(Base):
     player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
     enabled: Mapped[bool] = mapped_column(default=True)
 
+class DataPreference(Base):
+    __tablename__ = 'data_preferences'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    personalized_recommendations: Mapped[bool] = mapped_column(default=True)
+
 class ProfileVisit(Base):
     __tablename__ = 'profile_visits'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -205,6 +210,7 @@ class Health(BaseModel): status: str; service: str; timestamp: datetime
 class FarmAction(BaseModel): crop: str = Field(default='wheat')
 class PrivacyUpdate(BaseModel): farm_public: bool; collection_public: bool
 class VisitorPreferenceUpdate(BaseModel): enabled: bool
+class DataPreferenceUpdate(BaseModel): personalized_recommendations: bool
 
 async def db() -> AsyncIterator[AsyncSession]:
     async with Session() as session: yield session
@@ -393,11 +399,20 @@ async def get_or_create_visitor_preference(player: Player, session: AsyncSession
         await session.commit()
     return preference
 
+async def get_or_create_data_preference(player: Player, session: AsyncSession) -> DataPreference:
+    preference = await session.get(DataPreference, player.id)
+    if not preference:
+        preference = DataPreference(player_id=player.id, personalized_recommendations=True)
+        session.add(preference)
+        await session.commit()
+    return preference
+
 async def profile_state(player: Player, session: AsyncSession) -> dict:
     profile = await get_or_create_profile(player, session)
     identity = await session.get(TelegramIdentity, player.id)
     age_consent = await session.get(AgeConsent, player.id)
     visitor_preference = await get_or_create_visitor_preference(player, session)
+    data_preference = await get_or_create_data_preference(player, session)
     pets = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id))).all())
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id))).all())
     return {
@@ -407,6 +422,7 @@ async def profile_state(player: Player, session: AsyncSession) -> dict:
         'honors': {'farm_level': player.farm_level, 'highest_pet_tier': max((pet.tier for pet in pets if pet.amount > 0), default=0), 'crafted_cards': len(cards)},
         'privacy': {'farm_public': profile.farm_public, 'collection_public': profile.collection_public},
         'visitor_history_enabled': visitor_preference.enabled,
+        'personalized_recommendations': data_preference.personalized_recommendations,
         'checkin': await checkin_state(player, session),
     }
 
@@ -488,6 +504,13 @@ async def update_visitor_preference(update: VisitorPreferenceUpdate, player: Pla
     preference.enabled = update.enabled
     await session.commit()
     return {'enabled': preference.enabled}
+
+@app.put('/api/profile/data-preferences')
+async def update_data_preference(update: DataPreferenceUpdate, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    preference = await get_or_create_data_preference(player, session)
+    preference.personalized_recommendations = update.personalized_recommendations
+    await session.commit()
+    return {'personalized_recommendations': preference.personalized_recommendations}
 
 @app.get('/api/friends/invite')
 async def friend_invite(player: Player = Depends(eligible_player)) -> dict:
