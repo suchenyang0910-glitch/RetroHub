@@ -45,6 +45,28 @@ def test_production_accepts_valid_telegram_signature(monkeypatch):
         assert response.status_code == 200
         assert response.json()['player']['name'] == 'Test'
 
+def test_signed_telegram_identity_syncs_name_and_avatar(monkeypatch):
+    import hashlib
+    import hmac
+    import json
+    from datetime import datetime, timezone
+    from urllib.parse import urlencode
+    from fastapi.testclient import TestClient
+    from app.main import app
+    token = 'identity-test-token'
+    user = {'id': 911223, 'first_name': 'Retro', 'photo_url': 'https://example.test/avatar.jpg'}
+    values = {'auth_date': str(int(datetime.now(timezone.utc).timestamp())), 'user': json.dumps(user, separators=(',', ':'))}
+    check = '\n'.join(f'{key}={value}' for key, value in sorted(values.items()))
+    secret = hmac.new(b'WebAppData', token.encode(), hashlib.sha256).digest()
+    values['hash'] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    monkeypatch.setenv('DEBUG', 'false')
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', token)
+    with TestClient(app) as client:
+        profile = client.get('/api/profile', headers={'X-Telegram-Init-Data': urlencode(values)})
+        assert profile.status_code == 200
+        assert profile.json()['name'] == 'Retro'
+        assert profile.json()['avatar_url'] == user['photo_url']
+
 def test_pet_merge_and_card_crafting_loops(monkeypatch):
     from uuid import uuid4
     from fastapi.testclient import TestClient

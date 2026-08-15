@@ -94,6 +94,12 @@ class PlayerProfile(Base):
     farm_public: Mapped[bool] = mapped_column(default=False)
     collection_public: Mapped[bool] = mapped_column(default=False)
 
+class TelegramIdentity(Base):
+    __tablename__ = 'telegram_identities'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class Friendship(Base):
     __tablename__ = 'friendships'
     __table_args__ = (UniqueConstraint('player_low_id', 'player_high_id', name='uq_friend_pair'),)
@@ -135,6 +141,7 @@ async def current_player(
         telegram_user = validate_init_data(x_telegram_init_data)
         telegram_id = str(telegram_user["id"])
         display_name = telegram_user.get("first_name") or telegram_user.get("username") or "Player"
+        avatar_url = telegram_user.get("photo_url")
     elif is_debug():
         telegram_id = x_telegram_user or 'demo-player'
         display_name = 'Demo Player'
@@ -144,6 +151,15 @@ async def current_player(
     if not player:
         player = Player(telegram_id=telegram_id, display_name=display_name)
         session.add(player); await session.commit(); await session.refresh(player)
+    if x_telegram_init_data:
+        player.display_name = display_name
+        identity = await session.get(TelegramIdentity, player.id)
+        if not identity:
+            identity = TelegramIdentity(player_id=player.id)
+            session.add(identity)
+        identity.avatar_url = avatar_url
+        identity.synced_at = datetime.now(timezone.utc)
+        await session.commit()
     return player
 
 async def farm_state(p: Player, session: AsyncSession) -> dict:
@@ -209,10 +225,12 @@ async def get_or_create_profile(player: Player, session: AsyncSession) -> Player
 
 async def profile_state(player: Player, session: AsyncSession) -> dict:
     profile = await get_or_create_profile(player, session)
+    identity = await session.get(TelegramIdentity, player.id)
     pets = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id))).all())
     cards = list((await session.scalars(select(Card).where(Card.player_id == player.id))).all())
     return {
         'name': player.display_name,
+        'avatar_url': identity.avatar_url if identity else None,
         'honors': {'farm_level': player.farm_level, 'highest_pet_tier': max((pet.tier for pet in pets if pet.amount > 0), default=0), 'crafted_cards': len(cards)},
         'privacy': {'farm_public': profile.farm_public, 'collection_public': profile.collection_public},
         'checkin': await checkin_state(player, session),
@@ -274,7 +292,8 @@ async def get_friends(player: Player = Depends(current_player), session: AsyncSe
     result = []
     for friend in friends:
         profile = await get_or_create_profile(friend, session)
-        result.append({'telegram_id': friend.telegram_id, 'name': friend.display_name, 'farm_public': profile.farm_public})
+        identity = await session.get(TelegramIdentity, friend.id)
+        result.append({'telegram_id': friend.telegram_id, 'name': friend.display_name, 'avatar_url': identity.avatar_url if identity else None, 'farm_public': profile.farm_public})
     return {'friends': result}
 
 @app.get('/api/friends/{friend_telegram_id}/farm')
