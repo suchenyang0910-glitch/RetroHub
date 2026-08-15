@@ -74,6 +74,7 @@ function App() {
     const profileState = await request('/api/profile');
     setProfile(profileState);
     hasAuthenticated.current = true;
+    setAuthError(false);
     if (!profileState.age_confirmed) return;
     setCheckin(await request('/api/checkin'));
     setOnboarding(await request('/api/onboarding'));
