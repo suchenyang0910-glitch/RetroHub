@@ -6,8 +6,8 @@ type Farm = { level: number; xp: number; coins: number; diamonds: number; plot: 
 type Pets = { pets: { tier: number; amount: number }[] };
 type Cards = { materials: number; chapter: number; cards: { key: string; level: number }[] };
 type Game = 'farm' | 'pets' | 'cards';
-const telegram = (window as any).Telegram?.WebApp;
-const headers = (): Record<string, string> => { const initData = telegram?.initData as string | undefined; return initData ? { 'X-Telegram-Init-Data': initData } : {}; };
+const getTelegram = () => (window as any).Telegram?.WebApp;
+const headers = (): Record<string, string> => { const initData = getTelegram()?.initData as string | undefined; return initData ? { 'X-Telegram-Init-Data': initData } : {}; };
 const gameMeta: Record<Game, { label: string; title: string; description: string; tone: string }> = {
   farm: { label: 'FARM', title: 'Memory Farm', description: 'Plant, harvest and grow your little town.', tone: 'farm' },
   pets: { label: 'PET', title: 'Pet Merge', description: 'Merge matching pixel pets into new companions.', tone: 'pet' },
@@ -19,7 +19,8 @@ function App() {
   const [farm, setFarm] = React.useState<Farm | null>(null);
   const [pets, setPets] = React.useState<Pets | null>(null);
   const [cards, setCards] = React.useState<Cards | null>(null);
-  const [toast, setToast] = React.useState('Loading...');
+  const [toast, setToast] = React.useState('');
+  const [authError, setAuthError] = React.useState(false);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200); };
   const request = React.useCallback(async (path: string, method = 'GET') => {
     const response = await fetch(path, { method, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), ...headers() } });
@@ -27,15 +28,19 @@ function App() {
     return response.json();
   }, []);
   const refresh = React.useCallback(async () => {
-    try {
-      if (game === 'farm') setFarm(await request('/api/farm'));
-      if (game === 'pets') setPets(await request('/api/pets'));
-      if (game === 'cards') setCards(await request('/api/cards'));
-      setToast('');
-    } catch { notify('Open from Telegram to start playing'); }
+    if (game === 'farm') setFarm(await request('/api/farm'));
+    if (game === 'pets') setPets(await request('/api/pets'));
+    if (game === 'cards') setCards(await request('/api/cards'));
   }, [game, request]);
-  React.useEffect(() => { telegram?.ready(); void refresh(); }, [refresh]);
-  React.useEffect(() => { const timer = window.setInterval(() => void refresh(), 1000); return () => window.clearInterval(timer); }, [refresh]);
+  React.useEffect(() => {
+    let active = true;
+    getTelegram()?.ready();
+    getTelegram()?.expand();
+    const load = async () => { try { await refresh(); if (active) setAuthError(false); } catch { if (active) setAuthError(true); } };
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 15_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [refresh]);
   const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') setFarm(data); if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
   const farmReady = farm?.plot.crop && farm.plot.ready;
   const petTier = pets?.pets.find((pet) => pet.amount >= 2)?.tier;
@@ -45,7 +50,7 @@ function App() {
     : game === 'pets'
       ? { text: petTier ? `Merge tier ${petTier}` : 'Need two pets', run: () => petTier ? void perform(`/api/pets/merge/${petTier}`, `Tier ${petTier + 1} pet discovered!`) : notify('Earn or merge more pets first') }
       : { text: 'Play chapter', run: () => void perform('/api/cards/battle', 'Victory! +15 crafting materials.') };
-  const status = game === 'farm' ? (farm ? `${farm.coins} coins · ${farm.diamonds} diamonds · ${farm.xp} XP` : 'Syncing farm...')
+  const status = authError ? 'Open this Mini App from Telegram to authenticate.' : game === 'farm' ? (farm ? `${farm.coins} coins · ${farm.diamonds} diamonds · ${farm.xp} XP` : 'Syncing farm...')
     : game === 'pets' ? (pets ? `${pets.pets.reduce((total, pet) => total + pet.amount, 0)} pets in your collection` : 'Syncing collection...')
       : (cards ? `Chapter ${cards.chapter} · ${cards.materials} materials` : 'Syncing card collection...');
   return <main className="app-shell"><header><div><p className="eyebrow">RETROHUB TEST</p><h1>{gameMeta[game].title}</h1></div><button className="avatar" aria-label="Telegram profile">@</button></header>
