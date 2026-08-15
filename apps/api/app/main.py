@@ -641,17 +641,29 @@ async def claim_checkin(player: Player = Depends(eligible_player), session: Asyn
     return {**await checkin_state(player, session), 'collection_awarded': reward}
 
 @app.get('/api/leaderboards/farm')
-async def farm_leaderboard(period: str = Query(default='all_time'), player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+async def farm_leaderboard(period: str = Query(default='all_time'), scope: str = Query(default='global'), player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    if scope not in {'global', 'friends'}:
+        raise HTTPException(422, 'Unsupported leaderboard scope')
+    player_ids: list[int] | None = None
+    if scope == 'friends':
+        links = list((await session.scalars(select(Friendship).where((Friendship.player_low_id == player.id) | (Friendship.player_high_id == player.id)))).all())
+        player_ids = [player.id, *[link.player_high_id if link.player_low_id == player.id else link.player_low_id for link in links]]
     if period == 'all_time':
-        players = list((await session.scalars(select(Player).order_by(Player.farm_level.desc(), Player.farm_xp.desc(), Player.id.asc()).limit(20))).all())
+        statement = select(Player)
+        if player_ids is not None:
+            statement = statement.where(Player.id.in_(player_ids))
+        players = list((await session.scalars(statement.order_by(Player.farm_level.desc(), Player.farm_xp.desc(), Player.id.asc()).limit(20))).all())
         entries = [{'rank': index + 1, 'name': row.display_name, 'level': row.farm_level, 'xp': row.farm_xp, 'is_me': row.id == player.id} for index, row in enumerate(players)]
-        return {'period': period, 'metric': 'farm_level', 'entries': entries}
+        return {'period': period, 'scope': scope, 'metric': 'farm_level', 'entries': entries}
     if period not in {'week', 'month'}:
         raise HTTPException(422, 'Unsupported leaderboard period')
     period_key = competition_period_key(period, datetime.now(timezone.utc).date())
-    rows = (await session.execute(select(FarmCompetitionScore, Player).join(Player, FarmCompetitionScore.player_id == Player.id).where(FarmCompetitionScore.period == period, FarmCompetitionScore.period_key == period_key).order_by(FarmCompetitionScore.points.desc(), Player.id.asc()).limit(20))).all()
+    statement = select(FarmCompetitionScore, Player).join(Player, FarmCompetitionScore.player_id == Player.id).where(FarmCompetitionScore.period == period, FarmCompetitionScore.period_key == period_key)
+    if player_ids is not None:
+        statement = statement.where(FarmCompetitionScore.player_id.in_(player_ids))
+    rows = (await session.execute(statement.order_by(FarmCompetitionScore.points.desc(), Player.id.asc()).limit(20))).all()
     entries = [{'rank': index + 1, 'name': row.Player.display_name, 'points': row.FarmCompetitionScore.points, 'is_me': row.Player.id == player.id} for index, row in enumerate(rows)]
-    return {'period': period, 'period_key': period_key, 'metric': 'order_points', 'entries': entries}
+    return {'period': period, 'scope': scope, 'period_key': period_key, 'metric': 'order_points', 'entries': entries}
 
 @app.get('/api/farm')
 async def get_farm(player: Player = Depends(eligible_player), session: AsyncSession = Depends(db)) -> dict:

@@ -353,6 +353,10 @@ def test_friends_can_visit_and_water_public_farms(monkeypatch):
         assert accepted.status_code == 200
         friends = client.get('/api/friends', headers=helper_headers)
         assert friends.json()['friends'][0]['telegram_id'] == owner_id
+        friend_board = client.get('/api/leaderboards/farm?scope=friends', headers=helper_headers)
+        assert friend_board.status_code == 200
+        assert friend_board.json()['scope'] == 'friends'
+        assert len(friend_board.json()['entries']) == 2
         assert client.post('/api/farm/plant', headers=owner_headers, json={'crop': 'wheat'}).status_code == 200
         visit = client.get(f'/api/friends/{owner_id}/farm', headers=helper_headers)
         assert visit.status_code == 200
