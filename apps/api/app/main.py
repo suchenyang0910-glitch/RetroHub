@@ -79,6 +79,12 @@ class FarmOrder(Base):
     order_key: Mapped[str] = mapped_column(String(40))
     claimed: Mapped[bool] = mapped_column(default=False)
 
+class PlayerProfile(Base):
+    __tablename__ = 'player_profiles'
+    player_id: Mapped[int] = mapped_column(ForeignKey('players.id'), primary_key=True)
+    farm_public: Mapped[bool] = mapped_column(default=False)
+    collection_public: Mapped[bool] = mapped_column(default=False)
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all)
@@ -88,6 +94,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title='RetroHub Test API', version='0.2.0', lifespan=lifespan)
 class Health(BaseModel): status: str; service: str; timestamp: datetime
 class FarmAction(BaseModel): crop: str = Field(default='wheat', pattern='^wheat$')
+class PrivacyUpdate(BaseModel): farm_public: bool; collection_public: bool
 
 async def db() -> AsyncIterator[AsyncSession]:
     async with Session() as session: yield session
@@ -163,6 +170,25 @@ async def checkin_state(player: Player, session: AsyncSession) -> dict:
         cursor -= timedelta(days=1)
     return {'played_today': played_today, 'claimed_today': today in claimed_days, 'streak': streak, 'can_claim': played_today and today not in claimed_days}
 
+async def get_or_create_profile(player: Player, session: AsyncSession) -> PlayerProfile:
+    profile = await session.get(PlayerProfile, player.id)
+    if not profile:
+        profile = PlayerProfile(player_id=player.id)
+        session.add(profile)
+        await session.commit()
+    return profile
+
+async def profile_state(player: Player, session: AsyncSession) -> dict:
+    profile = await get_or_create_profile(player, session)
+    pets = list((await session.scalars(select(PetStack).where(PetStack.player_id == player.id))).all())
+    cards = list((await session.scalars(select(Card).where(Card.player_id == player.id))).all())
+    return {
+        'name': player.display_name,
+        'honors': {'farm_level': player.farm_level, 'highest_pet_tier': max((pet.tier for pet in pets if pet.amount > 0), default=0), 'crafted_cards': len(cards)},
+        'privacy': {'farm_public': profile.farm_public, 'collection_public': profile.collection_public},
+        'checkin': await checkin_state(player, session),
+    }
+
 @app.get('/health', response_model=Health)
 async def health() -> Health: return Health(status='ok', service='retrohub-api', timestamp=datetime.now(timezone.utc))
 
@@ -173,6 +199,18 @@ async def hub(player: Player = Depends(current_player), session: AsyncSession = 
 @app.get('/api/checkin')
 async def get_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
     return await checkin_state(player, session)
+
+@app.get('/api/profile')
+async def get_profile(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    return await profile_state(player, session)
+
+@app.put('/api/profile/privacy')
+async def update_profile_privacy(update: PrivacyUpdate, player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:
+    profile = await get_or_create_profile(player, session)
+    profile.farm_public = update.farm_public
+    profile.collection_public = update.collection_public
+    await session.commit()
+    return await profile_state(player, session)
 
 @app.post('/api/checkin/claim')
 async def claim_checkin(player: Player = Depends(current_player), session: AsyncSession = Depends(db)) -> dict:

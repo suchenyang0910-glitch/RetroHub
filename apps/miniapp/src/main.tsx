@@ -8,6 +8,7 @@ type Pets = { pets: { tier: number; amount: number }[] };
 type Cards = { materials: number; chapter: number; cards: { key: string; level: number }[] };
 type Checkin = { played_today: boolean; claimed_today: boolean; streak: number; can_claim: boolean; collection_awarded?: number };
 type Leaderboard = { entries: { rank: number; name: string; level: number; xp: number; is_me: boolean }[] };
+type Profile = { name: string; honors: { farm_level: number; highest_pet_tier: number; crafted_cards: number }; privacy: { farm_public: boolean; collection_public: boolean } };
 type Game = 'farm' | 'pets' | 'cards';
 type Locale = 'en' | 'zh' | 'ru';
 const getTelegram = () => (window as any).Telegram?.WebApp;
@@ -39,12 +40,13 @@ function App() {
   const [cards, setCards] = React.useState<Cards | null>(null);
   const [checkin, setCheckin] = React.useState<Checkin | null>(null);
   const [leaderboard, setLeaderboard] = React.useState<Leaderboard | null>(null);
+  const [profile, setProfile] = React.useState<Profile | null>(null);
   const [toast, setToast] = React.useState('');
   const [authError, setAuthError] = React.useState(false);
   const changeLocale = (next: Locale) => { window.localStorage.setItem('retrohub.locale', next); setLocale(next); };
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200); };
   const request = React.useCallback(async (path: string, method = 'GET') => {
-    const response = await fetch(path, { method, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), ...headers() } });
+    const response = await fetch(path, { method, headers: { ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}), ...headers() } });
     if (!response.ok) { const data = await response.json(); throw new Error(data.detail || 'Action unavailable'); }
     return response.json();
   }, []);
@@ -66,6 +68,8 @@ function App() {
   const perform = async (path: string, success: string) => { try { const data = await request(path, 'POST'); if (game === 'farm') { setFarm(data); setFarmOrders(await request('/api/farm/orders')); } if (game === 'pets') setPets(data); if (game === 'cards') setCards(data); setCheckin(await request('/api/checkin')); notify(success); } catch (error) { notify(error instanceof Error ? error.message : 'Action unavailable'); } };
   const claimCheckin = async () => { try { const data = await request('/api/checkin/claim', 'POST'); setCheckin(data); notify(`Check-in complete. +${data.collection_awarded} memory card${data.collection_awarded > 1 ? 's' : ''}.`); } catch (error) { notify(error instanceof Error ? error.message : 'Check-in unavailable'); } };
   const loadLeaderboard = async () => { try { setLeaderboard(await request('/api/leaderboards/farm')); } catch (error) { notify(error instanceof Error ? error.message : 'Leaderboard unavailable'); } };
+  const loadProfile = async () => { try { setProfile(await request('/api/profile')); } catch (error) { notify(error instanceof Error ? error.message : 'Profile unavailable'); } };
+  const updatePrivacy = async (farmPublic: boolean, collectionPublic: boolean) => { try { const response = await fetch('/api/profile/privacy', { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ farm_public: farmPublic, collection_public: collectionPublic }) }); if (!response.ok) throw new Error('Privacy update unavailable'); setProfile(await response.json()); } catch (error) { notify(error instanceof Error ? error.message : 'Privacy update unavailable'); } };
   const farmReady = farm?.plot.crop && farm.plot.ready;
   const petTier = pets?.pets.find((pet) => pet.amount >= 2)?.tier;
   const select = (next: Game) => { setGame(next); setToast('Loading ' + gameMeta[next].title + '...'); };
@@ -87,7 +91,8 @@ function App() {
     {game === 'pets' && pets && <section className="detail-panel"><b>{t.petBoard}</b><p>{pets.pets.map((pet) => `Tier ${pet.tier}: ${pet.amount}`).join(' · ')}</p></section>}
     {game === 'cards' && cards && <section className="detail-panel"><b>{t.forge}</b><p>{cards.cards.length ? cards.cards.map((card) => `${card.key.replace('_', ' ')} Lv.${card.level}`).join(' · ') : t.noCards}</p><button onClick={() => void perform('/api/cards/craft/clockwork_fox', 'Clockwork Fox forged!')}>{t.craft}</button></section>}
     {leaderboard && <section className="detail-panel"><b>{t.leaderboard}</b><p>{leaderboard.entries.length ? leaderboard.entries.slice(0, 5).map((entry) => `#${entry.rank} ${entry.name} Lv.${entry.level}${entry.is_me ? ' (You)' : ''}`).join(' · ') : t.noRanks}</p></section>}
+    {profile && <section className="detail-panel"><b>{profile.name}'s profile</b><p>Farm Lv.{profile.honors.farm_level} · Pet tier {profile.honors.highest_pet_tier || '-'} · {profile.honors.crafted_cards} crafted cards</p><button onClick={() => void updatePrivacy(!profile.privacy.farm_public, profile.privacy.collection_public)}>Farm: {profile.privacy.farm_public ? 'Public' : 'Private'}</button><button onClick={() => void updatePrivacy(profile.privacy.farm_public, !profile.privacy.collection_public)}>Collection: {profile.privacy.collection_public ? 'Public' : 'Private'}</button></section>}
     <section className="status"><div><span className="pulse" /> {t.beta}</div><button onClick={() => void loadLeaderboard()}>{t.ranks}</button></section>
-    <nav><button className="active">{t.navHall}</button><button>{t.friends}</button><button>{t.ranks}</button><button>{t.me}</button></nav>{toast && <div role="status" className="toast">{toast}</div>}</main>;
+    <nav><button className="active">{t.navHall}</button><button>{t.friends}</button><button onClick={() => void loadLeaderboard()}>{t.ranks}</button><button onClick={() => void loadProfile()}>{t.me}</button></nav>{toast && <div role="status" className="toast">{toast}</div>}</main>;
 }
 createRoot(document.getElementById('root')!).render(<App />);

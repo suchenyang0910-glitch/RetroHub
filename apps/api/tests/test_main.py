@@ -106,3 +106,17 @@ def test_farm_order_consumes_inventory_and_rewards_player(monkeypatch):
         assert claimed.json()['inventory']['wheat'] == 0
         assert claimed.json()['orders'][0]['claimed'] is True
         assert claimed.json()['coins'] == 1120
+
+def test_profile_honors_and_privacy_controls(monkeypatch):
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from app.main import app
+    monkeypatch.setenv('DEBUG', 'true')
+    headers = {'X-Telegram-User': f'test-profile-{uuid4()}'}
+    with TestClient(app) as client:
+        profile = client.get('/api/profile', headers=headers)
+        assert profile.status_code == 200
+        assert profile.json()['privacy'] == {'farm_public': False, 'collection_public': False}
+        updated = client.put('/api/profile/privacy', headers=headers, json={'farm_public': True, 'collection_public': True})
+        assert updated.status_code == 200
+        assert updated.json()['privacy'] == {'farm_public': True, 'collection_public': True}
